@@ -13,7 +13,7 @@ services:
       target: runtime
     environment:
       APP_ENV: development
-      POLICY_FILE: /app/config/policy.default.yaml
+      POLICY_FILE: config/policy.default.yaml
       STORAGE_BACKEND: postgres
       DATABASE_URL: postgresql+asyncpg://privacy_gateway:dev-password@postgres/privacy_gateway
       # EXTERNAL_* comes from .env. Hard-coding it here would silently

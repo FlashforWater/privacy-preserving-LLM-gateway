@@ -462,31 +462,33 @@ def verify_spans(text: str, entities: list[RawEntity]) -> SpanVerification:
             rejected += 1
             continue
 
-        # Fast path: the model's offsets happen to be right.
-        if 0 <= entity.start < entity.end <= length and text[entity.start : entity.end] == entity.text:
-            key = (entity.start, entity.end, entity.type)
-            if key not in seen:
-                seen.add(key)
-                accepted.append(
-                    VerifiedSpan(entity.start, entity.end, entity.text, entity.type,
-                                 entity.confidence)
-                )
-            continue
-
-        # Otherwise locate the claimed string ourselves.
+        # Locate the claimed string ourselves, always. There is deliberately no
+        # short-circuit for the case where the model's offsets happen to be
+        # right: taking them and stopping there marks the first occurrence only,
+        # so a name appearing twice keeps its second appearance — in the outbound
+        # payload. The reported offsets are used for one thing only: labelling
+        # which occurrence, if any, the model actually pointed at.
         occurrences = _find_all(text, entity.text)
         if not occurrences:
             rejected += 1
             continue
-        relocated += 1
+        pointed_correctly = (
+            0 <= entity.start < entity.end <= length
+            and text[entity.start : entity.end] == entity.text
+        )
+        if not pointed_correctly:
+            relocated += 1
         for start in occurrences[:MAX_OCCURRENCES_PER_CLAIM]:
-            key = (start, start + len(entity.text), entity.type)
+            end = start + len(entity.text)
+            key = (start, end, entity.type)
             if key in seen:
                 continue
             seen.add(key)
             accepted.append(
-                VerifiedSpan(start, start + len(entity.text), entity.text, entity.type,
-                             entity.confidence, relocated=True)
+                VerifiedSpan(
+                    start, end, entity.text, entity.type, entity.confidence,
+                    relocated=not (pointed_correctly and start == entity.start),
+                )
             )
 
     accepted.sort(key=lambda span: (span.start, -span.end))

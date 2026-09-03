@@ -85,10 +85,18 @@ def sniff_mime(data: bytes, *, declared: str | None = None, filename: str | None
                 return "image/webp" if data[8:12] == b"WEBP" else "application/octet-stream"
             return mime
 
-    # Fall back to text only when the bytes really are decodable text.
+    # Fall back to text only when the bytes really are text. Decodability alone
+    # is not enough: a binary blob whose bytes all happen to sit below 0x80
+    # decodes cleanly, and calling it text/plain hands it to the text parser
+    # instead of rejecting an unrecognised format.
+    sample = data[:4096]
+    if b"\x00" in sample:
+        return "application/octet-stream"
     try:
-        data[:4096].decode("utf-8")
+        sample.decode("utf-8")
     except UnicodeDecodeError:
+        return "application/octet-stream"
+    if any(byte < 0x09 or 0x0E <= byte < 0x20 for byte in sample):
         return "application/octet-stream"
     return "text/plain"
 

@@ -24,8 +24,11 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
+from pathlib import Path
 
 import httpx
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.config import get_settings
 

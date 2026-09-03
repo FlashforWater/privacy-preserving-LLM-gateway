@@ -58,6 +58,26 @@ def policy() -> PolicyEngine:
     return PolicyEngine(load_policy_document(POLICY_PATH))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_from_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the developer's .env out of the test run.
+
+    Settings reads .env by default, so a machine with a configured gateway made
+    assertions about production rejection pass or fail depending on whose laptop
+    ran them. Tests have to describe the code, not the checkout.
+    """
+    for name in list(os.environ):
+        if name.startswith(
+            ("APP_", "POLICY_", "VAULT_", "SCOPE_", "LOCAL_MODEL_", "EXTERNAL_",
+             "OCR_", "DEV_STATIC_", "STORAGE_", "DATABASE_", "MAPPING_", "ENABLE_",
+             "REQUEST_", "MAX_CONCURRENT")
+        ):
+            monkeypatch.delenv(name, raising=False)
+    # model_config is a TypedDict, so the entry is replaced rather than an
+    # attribute set.
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
 @pytest.fixture
 def settings() -> Settings:
     return Settings(

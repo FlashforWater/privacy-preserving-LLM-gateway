@@ -84,7 +84,15 @@ class TestParserSafety:
             ensure_supported(sniff_mime(data))
 
     def test_encrypted_archive_is_rejected(self) -> None:
+        """Python cannot write an encrypted zip, so the flag is set by hand.
+
+        It has to be set in the *central directory*, not the local header:
+        ``ZipFile.infolist`` reads the central directory, and an earlier version
+        of this test patched the local header only — it passed for the wrong
+        reason until the suite was actually run.
+        """
         import io
+        import struct
         import zipfile
 
         buffer = io.BytesIO()
@@ -92,11 +100,15 @@ class TestParserSafety:
             archive.writestr("[Content_Types].xml", '<Types xmlns="x"/>')
             archive.writestr("word/document.xml", "<w/>")
         data = bytearray(buffer.getvalue())
-        # Set the encrypted flag on the first local header.
-        data[6] |= 0x01
+        for offset in range(len(data) - 4):
+            if data[offset : offset + 4] == b"PK\x01\x02":       # central directory header
+                flags = struct.unpack_from("<H", data, offset + 8)[0]
+                struct.pack_into("<H", data, offset + 8, flags | 0x1)
+
+        from app.core.errors import UnsupportedMediaType
         from app.parsers.ooxml_common import open_archive
 
-        with pytest.raises(Exception):
+        with pytest.raises(UnsupportedMediaType):
             open_archive(bytes(data), ParserLimits())
 
     def test_xml_entity_declaration_is_rejected(self) -> None:
