@@ -95,6 +95,11 @@ class Settings(BaseSettings):
     # the English prompt, and stopped mis-labelling plates and phone numbers as
     # UNKNOWN_SENSITIVE (which the policy blocks on).
     local_model_prompt: str = "entity_detection_zh_v1"
+    # Ask the local vision model to classify images as well. It can only make a
+    # classification stricter, so enabling it cannot forward something the
+    # text-based classifier would have withheld. Off by default because it costs
+    # a model call per image and the served model must accept images.
+    local_model_image_analysis: bool = False
 
     ocr_backend: Literal["local", "none"] = "local"
     ocr_timeout_seconds: float = 30.0
@@ -132,6 +137,33 @@ class Settings(BaseSettings):
     # to before the call, which is both a clearer error and one less pointless
     # transmission of an approved image.
     external_vision_models: str = ""
+    # Per-model parameter constraints, "model=temperature" comma-separated.
+    # Some models accept only one temperature and reject everything else with a
+    # 400: kimi-k3 answers "only 1 is allowed for this model". Without this a
+    # model can sit on the allow-list and fail every request that uses the
+    # default. Parameter shaping is provider-format conversion, which is the
+    # adapter's job, so it belongs here rather than in every caller's manifest.
+    external_model_temperatures: str = ""
+
+    @property
+    def model_temperatures(self) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for entry in self.external_model_temperatures.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            model, _, value = entry.partition("=")
+            if not model or not value:
+                raise ConfigurationError(
+                    "EXTERNAL_MODEL_TEMPERATURES entries must be model=temperature"
+                )
+            try:
+                out[model.strip()] = float(value)
+            except ValueError as exc:
+                raise ConfigurationError(
+                    f"EXTERNAL_MODEL_TEMPERATURES: {value!r} is not a number"
+                ) from exc
+        return out
 
     @property
     def vision_models(self) -> frozenset[str]:

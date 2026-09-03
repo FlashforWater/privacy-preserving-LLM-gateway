@@ -127,6 +127,9 @@ class ParsedItem:
     #: True when the item's bytes may be forwarded unchanged if policy agrees.
     #: Only ever set for images that passed full inspection (guide §12.2).
     original_bytes_forwardable: bool = False
+    #: Image inspection detail, including the raw bytes, for the asynchronous
+    #: vision classifier. In-process only; nothing here is serialized.
+    image_inspection: object | None = None
 
 
 def normalize_text(value: str) -> str:

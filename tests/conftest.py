@@ -191,6 +191,7 @@ def harness(
             keyword_detector=KeywordDetector(),
             local_model_detector=LocalModelDetector(local_model),
             adapter=adapter,
+            vision_classifier=None,
             vault=vault,
             restorer=Restorer(vault),
             hmac_key=HMAC_KEY,

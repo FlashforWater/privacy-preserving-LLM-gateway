@@ -159,11 +159,24 @@ class Gateway:
             disable_thinking=settings.local_model_disable_thinking,
             max_tokens=settings.local_model_max_tokens, prompt=settings.local_model_prompt,
         )
+        vision_classifier = None
+        if settings.local_model_image_analysis:
+            from app.detectors.vlm_image_classifier import LocalVlmImageClassifier
+
+            vision_classifier = LocalVlmImageClassifier(
+                base_url=settings.local_model_base_url,
+                model=settings.local_model_name,
+                api_key=settings.local_model_api_key,
+                timeout_seconds=settings.local_model_timeout_seconds,
+            )
+
         self.adapter = OpenAICompatibleAdapter(
             base_url=settings.external_base_url, api_key=settings.external_api_key,
             allowed_models=settings.allowed_models,
             timeout_seconds=settings.external_timeout_seconds,
             reasoning=settings.external_reasoning,
+            vision_models=settings.vision_models,
+            model_temperatures=settings.model_temperatures,
         )
         self.orchestrator = Orchestrator(
             OrchestratorDependencies(
@@ -178,6 +191,7 @@ class Gateway:
                 keyword_detector=KeywordDetector(),
                 local_model_detector=LocalModelDetector(self.local_model),
                 adapter=self.adapter,
+                vision_classifier=vision_classifier,
                 vault=self.vault,
                 restorer=Restorer(self.vault),
                 hmac_key=settings.vault_hmac_key(),

@@ -45,6 +45,7 @@ class OpenAICompatibleAdapter:
         timeout_seconds: float = 60.0,
         reasoning: str = "provider_default",
         vision_models: frozenset[str] = frozenset(),
+        model_temperatures: dict[str, float] | None = None,
         retry: RetryPolicy | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -54,6 +55,7 @@ class OpenAICompatibleAdapter:
         self._timeout = timeout_seconds
         self._reasoning = reasoning
         self._vision_models = vision_models
+        self._model_temperatures = dict(model_temperatures or {})
         self._retry = retry or RetryPolicy()
         self._client = client
 
@@ -169,7 +171,12 @@ class OpenAICompatibleAdapter:
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
-            "temperature": request.temperature,
+            # A model that accepts only one temperature rejects anything else
+            # outright, so the constraint is applied here rather than left to
+            # every caller to remember.
+            "temperature": self._model_temperatures.get(
+                request.model, request.temperature
+            ),
             "max_tokens": request.max_output_tokens,
             # Streaming is not implemented in the MVP (guide §13.5): partial,
             # un-restored output has no safe failure mode.

@@ -75,6 +75,7 @@ class OrchestratorDependencies:
     keyword_detector: KeywordDetector
     local_model_detector: LocalModelDetector | None
     adapter: ExternalModelAdapter
+    vision_classifier: object | None
     vault: Vault
     restorer: Restorer
     hmac_key: bytes
@@ -405,6 +406,35 @@ class Orchestrator:
                 component="parser", result_code=exc.code
             ).inc()
             raise
+
+        # A vision model sees what an OCR-driven classifier cannot: an injury
+        # photograph or a face carries no text, so the heuristic calls it
+        # ordinary and the original pixels are forwarded. The verdict may only
+        # become stricter — see detectors/vlm_image_classifier.
+        if (
+            deps.vision_classifier is not None
+            and parsed_item.image_class is not None
+            and parsed_item.image_inspection is not None
+        ):
+            from app.detectors.image_classifier import ClassificationResult
+
+            before = parsed_item.image_class
+            verdict: ClassificationResult = await deps.vision_classifier.classify(
+                parsed_item.image_inspection,
+                ClassificationResult(
+                    before,
+                    str(parsed_item.inspection_notes.get("classification_reason", "")),
+                ),
+                context.deadline,
+            )
+            parsed_item.image_class = verdict.image_class
+            parsed_item.inspection_notes["classification_reason"] = verdict.reason
+            if verdict.image_class is not before:
+                parsed_item.inspection_notes["classification_tightened_from"] = before.value
+                # Pixels cleared for forwarding by the text-based pass are no
+                # longer cleared once something stricter has been said.
+                parsed_item.original_bytes_forwardable = False
+            stages.append("vision_classifier")
 
         findings: list[Finding] = []
         findings.extend(deps.regex_detector.detect(item, parsed_item))

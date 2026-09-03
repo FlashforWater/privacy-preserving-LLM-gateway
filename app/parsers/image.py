@@ -89,6 +89,9 @@ class ImageParser:
             has_gps=metadata.has_gps,
             metadata_fields=metadata.fields,
             decode_succeeded=not metadata.truncated,
+            # Kept in process so a pixel-level classifier can look; never
+            # serialized and never leaves this request.
+            data=item.data,
         )
 
         ocr_failed = False
@@ -114,7 +117,7 @@ class ImageParser:
             and not metadata.fields
         )
 
-        return ParsedItem(
+        parsed = ParsedItem(
             item_id=item.item_id,
             normalized_text=inspection.ocr_text,
             page_count=1,
@@ -135,6 +138,11 @@ class ImageParser:
                 "classification_reason": classification.reason,
             },
         )
+        # Handed to the async vision classifier by the orchestrator, which may
+        # tighten image_class. Parsing stays synchronous; a model call does not
+        # belong inside a parser.
+        parsed.image_inspection = inspection
+        return parsed
 
 
 # ---- metadata readers ----------------------------------------------------

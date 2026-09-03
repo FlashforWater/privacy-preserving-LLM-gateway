@@ -54,6 +54,9 @@ class ImageInspection:
     ocr_succeeded: bool = False
     decode_succeeded: bool = False
     notes: dict[str, str | int | bool] = field(default_factory=dict)
+    #: In-process only, for a classifier that looks at pixels rather than text.
+    #: Never serialized; the audit trail records the classification, not the image.
+    data: bytes = b""
 
     @property
     def pixels(self) -> int:
@@ -73,6 +76,22 @@ class ImageClassifier(Protocol):
     name: str
 
     def classify(self, inspection: ImageInspection) -> ClassificationResult: ...
+
+
+#: How restrictive each class is. Used when combining classifiers: the stricter
+#: verdict wins, so an added classifier can tighten a decision but never loosen
+#: one. ID_DOCUMENT and SENSITIVE map to the same policy action; the former ranks
+#: higher only because it is the more specific claim.
+CLASS_STRICTNESS: dict[ImageClass, int] = {
+    ImageClass.ORDINARY_IMAGE: 0,
+    ImageClass.SENSITIVE_IMAGE: 1,
+    ImageClass.ID_DOCUMENT_IMAGE: 2,
+    ImageClass.UNKNOWN_IMAGE: 3,
+}
+
+
+def stricter(a: ClassificationResult, b: ClassificationResult) -> ClassificationResult:
+    return b if CLASS_STRICTNESS[b.image_class] > CLASS_STRICTNESS[a.image_class] else a
 
 
 class HeuristicImageClassifier:
@@ -104,6 +123,11 @@ class HeuristicImageClassifier:
         if not inspection.ocr_succeeded:
             # Required inspection did not complete; not an ordinary image by default.
             return ClassificationResult(ImageClass.UNKNOWN_IMAGE, "ocr_unavailable")
+
+        # A picture with no text is where this classifier is blind: an injury
+        # photograph, a face, a screenshot of an app. It has nothing to match on
+        # and calls the image ordinary, which forwards the original pixels. That
+        # is what the vision-model classifier is for; see vlm_image_classifier.
 
         text = inspection.ocr_text
         if _KEYWORD_RE.search(text):

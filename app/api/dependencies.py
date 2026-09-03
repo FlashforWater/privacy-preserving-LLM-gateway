@@ -170,7 +170,19 @@ def build_application(settings: Settings) -> Application:
         timeout_seconds=settings.external_timeout_seconds,
         reasoning=settings.external_reasoning,
         vision_models=settings.vision_models,
+        model_temperatures=settings.model_temperatures,
     )
+
+    vision_classifier = None
+    if settings.local_model_image_analysis:
+        from app.detectors.vlm_image_classifier import LocalVlmImageClassifier
+
+        vision_classifier = LocalVlmImageClassifier(
+            base_url=settings.local_model_base_url,
+            model=settings.local_model_name,
+            api_key=settings.local_model_api_key,
+            timeout_seconds=settings.local_model_timeout_seconds,
+        )
 
     orchestrator = Orchestrator(
         OrchestratorDependencies(
@@ -180,6 +192,7 @@ def build_application(settings: Settings) -> Application:
             keyword_detector=KeywordDetector(),
             local_model_detector=LocalModelDetector(local_model),
             adapter=adapter,
+            vision_classifier=vision_classifier,
             vault=vault,
             restorer=Restorer(vault),
             hmac_key=keys.hmac_key(),
