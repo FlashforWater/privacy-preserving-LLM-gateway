@@ -30,7 +30,11 @@ dependencies = [
 # *every* component (headers, footers, comments, hidden sheets, properties), and
 # a convenience library that exposes only the main body would make "we inspected
 # everything" impossible to assert honestly.
-documents = ["pypdf>=5.1"]
+# pypdf reads the text layer; pypdfium2 rasterises pages that have none, so a
+# scan can be inspected instead of blocked. PDFium is permissively licensed and
+# ships prebuilt binaries — PyMuPDF renders as well but is AGPL, which is a
+# licensing decision rather than an engineering one.
+documents = ["pypdf>=5.1", "pypdfium2>=4.30"]
 # Image *metadata* is parsed with the standard library, for the same reason: the
 # check that decides whether original pixels may leave should not depend on a
 # third-party imaging library that might normalise away the very EXIF it is

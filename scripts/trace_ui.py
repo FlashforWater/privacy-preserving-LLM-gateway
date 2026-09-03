@@ -59,6 +59,7 @@ from app.parsers.base import ParserLimits, ParserRegistry, sniff_mime  # noqa: E
 from app.parsers.docx import DocxParser  # noqa: E402
 from app.parsers.image import ImageParser  # noqa: E402
 from app.parsers.pdf import PdfParser  # noqa: E402
+from app.parsers.pdf_render import PdfiumRenderer  # noqa: E402
 from app.parsers.plain_text import PlainTextParser  # noqa: E402
 from app.parsers.xlsx import XlsxParser  # noqa: E402
 from app.policy.engine import PolicyEngine  # noqa: E402
@@ -169,7 +170,8 @@ class Gateway:
                 policy=policy,
                 parsers=ParserRegistry([
                     PlainTextParser(), DocxParser(), XlsxParser(),
-                    PdfParser(ocr_engine=ocr),
+                    PdfParser(ocr_engine=ocr, renderer=PdfiumRenderer(
+                        max_pixels=limits.max_ocr_pixels)),
                     ImageParser(ocr_engine=ocr, classifier=HeuristicImageClassifier()),
                 ]),
                 regex_detector=RegexDetector(),

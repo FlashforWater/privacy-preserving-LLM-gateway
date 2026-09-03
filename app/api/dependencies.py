@@ -37,6 +37,7 @@ from app.parsers.base import ParserLimits, ParserRegistry
 from app.parsers.docx import DocxParser
 from app.parsers.image import ImageParser
 from app.parsers.pdf import PdfParser
+from app.parsers.pdf_render import PdfiumRenderer
 from app.parsers.plain_text import PlainTextParser
 from app.parsers.xlsx import XlsxParser
 from app.policy.engine import PolicyEngine
@@ -146,7 +147,8 @@ def build_application(settings: Settings) -> Application:
             PlainTextParser(),
             DocxParser(),
             XlsxParser(),
-            PdfParser(ocr_engine=ocr_engine),
+            PdfParser(ocr_engine=ocr_engine, renderer=PdfiumRenderer(
+                max_pixels=limits.max_ocr_pixels)),
             ImageParser(ocr_engine=ocr_engine, classifier=classifier),
         ]
     )

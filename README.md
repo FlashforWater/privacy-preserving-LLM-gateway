@@ -397,16 +397,21 @@ detector confidence depends on them; the numbers belong to nobody.
 | Tokenizer, encrypted vault, exact restoration | implemented |
 | Text, DOCX, XLSX inspection | implemented; standard library only |
 | PNG/JPEG inspection and routing | implemented; OCR needs `pip install ".[ocr]"` |
-| PDF text extraction | implemented; needs `pip install ".[documents]"` |
-| PDF page rasterisation for scanned pages | **not implemented** — a scanned page fails closed until a `PageRenderer` is supplied |
+| PDF, including scanned pages | implemented; needs `pip install ".[documents]"` |
 | Production principal verifier (mTLS / short-lived identity) | **not implemented** — `StaticTokenVerifier` is a development stand-in and readiness fails in production |
 | Streaming | deliberately absent (guide §13.5) |
 | Pixel-level image redaction | deliberately absent ([ADR 0002](docs/adr/0002-no-image-mutation.md)) |
 | Derived facts, multi-provider routing, Redis | deliberately absent |
 
-Both "not implemented" rows fail closed rather than degrading quietly: a scanned
-PDF page is blocked, and a production deployment reports not-ready until a real
-verifier is wired.
+The one remaining gap fails closed rather than degrading quietly: a production
+deployment reports not-ready until a real principal verifier is wired.
+
+A scanned PDF page — one with no text layer — is rendered with PDFium and read by
+OCR. Where that cannot be done legibly within the pixel budget, or where the
+render or OCR fails, the page stays uninspected and the file is blocked. That
+matters more than it sounds: an unreadable render returns no text, and no text is
+indistinguishable from a clean page, so the failure has to be loud rather than
+empty.
 
 ---
 
