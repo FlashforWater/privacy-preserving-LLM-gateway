@@ -328,6 +328,9 @@ make trace-ui        # http://127.0.0.1:8090
 ```
 
 A local page that runs a request through the real gateway and shows every stage:
+text and attachments (PDF, DOCX, XLSX, PNG, JPEG) can be dropped straight in, and
+each is shown with the parser that handled it, the text it yielded and the
+findings against it —
 what arrived, what each detector found and on what evidence, what policy decided
 and under which rule, what actually crossed the boundary, what came back, and
 what restoration produced. Two dashed lines mark the trust boundary so the
@@ -336,6 +339,12 @@ outbound payload is unmistakable.
 It is useful for the questions that are hard to answer from logs: why a request
 did not take the fast path, why a name was missed, whether the model or a rule
 found something, whether the tokens survived the round trip.
+
+One thing it is good at showing: a DOCX comment, a document's `creator`
+property, or a very-hidden XLSX sheet is content like any other. Drop in a
+workbook whose hidden sheet names a different payer and the external model will
+report the contradiction — which is only possible because the parser read the
+sheet nobody opens.
 
 **Development only, and it refuses to start otherwise.** The page shows original
 text, matched finding values and the decrypted token mapping table — exactly what
@@ -386,8 +395,8 @@ detector confidence depends on them; the numbers belong to nobody.
 | Local-model detector, strict validation, span verification | implemented |
 | Evidence merging, overlap resolution | implemented |
 | Tokenizer, encrypted vault, exact restoration | implemented |
-| Text, DOCX, XLSX, PNG/JPEG inspection | implemented |
-| Image classification, byte-for-byte pass, local-analysis routing | implemented |
+| Text, DOCX, XLSX inspection | implemented; standard library only |
+| PNG/JPEG inspection and routing | implemented; OCR needs `pip install ".[ocr]"` |
 | PDF text extraction | implemented; needs `pip install ".[documents]"` |
 | PDF page rasterisation for scanned pages | **not implemented** — a scanned page fails closed until a `PageRenderer` is supplied |
 | Production principal verifier (mTLS / short-lived identity) | **not implemented** — `StaticTokenVerifier` is a development stand-in and readiness fails in production |

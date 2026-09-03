@@ -23,6 +23,7 @@ than none — it builds confidence in behaviour that is not there.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -37,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.config import Principal, get_settings  # noqa: E402
 from app.core.deadlines import Deadline  # noqa: E402
-from app.core.errors import GatewayError  # noqa: E402
+from app.core.errors import GatewayError, InvalidRequest  # noqa: E402
 from app.detectors.image_classifier import HeuristicImageClassifier  # noqa: E402
 from app.detectors.keyword_detector import KeywordDetector  # noqa: E402
 from app.detectors.local_model_detector import (  # noqa: E402
@@ -54,7 +55,7 @@ from app.gateway.orchestrator import Orchestrator, OrchestratorDependencies  # n
 from app.gateway.scope_service import InMemoryScopeStore, ScopeService  # noqa: E402
 from app.gateway.trace import TraceRecorder  # noqa: E402
 from app.ocr.local_ocr import build_ocr_engine  # noqa: E402
-from app.parsers.base import ParserLimits, ParserRegistry  # noqa: E402
+from app.parsers.base import ParserLimits, ParserRegistry, sniff_mime  # noqa: E402
 from app.parsers.docx import DocxParser  # noqa: E402
 from app.parsers.image import ImageParser  # noqa: E402
 from app.parsers.pdf import PdfParser  # noqa: E402
@@ -193,7 +194,14 @@ class Gateway:
         )
         self.model = sorted(settings.allowed_models)[0] if settings.allowed_models else ""
 
-    async def run(self, text: str, purpose: str, scope_id: str | None) -> dict:
+    async def run(
+        self,
+        text: str,
+        purpose: str,
+        scope_id: str | None,
+        uploads: list[dict[str, str]] | None = None,
+        model: str | None = None,
+    ) -> dict:
         scope = (
             await self.scopes.require_active(
                 tenant_id=self.principal.tenant_id, scope_id=scope_id
@@ -201,12 +209,38 @@ class Gateway:
             if scope_id
             else await self.scopes.create(tenant_id=self.principal.tenant_id)
         )
+        content: list[dict[str, str]] = []
+        files: dict[str, bytes] = {}
+        if text.strip():
+            content.append({"type": "text", "item_id": "prompt-1", "text": text})
+        for index, upload in enumerate(uploads or [], start=1):
+            data = base64.b64decode(upload["b64"])
+            item_id = f"file-{index}"
+            field = f"file_{item_id}"
+            files[field] = data
+            # The real API has the client declare file vs image, because it knows
+            # what it is sending. Here the type is derived from the bytes so that
+            # dragging a photo in routes it as a photo — a convenience of the
+            # inspector, not of the gateway.
+            try:
+                mime = sniff_mime(data, filename=upload.get("name"))
+            except GatewayError:
+                mime = "application/octet-stream"
+            content.append({
+                "type": "image" if mime.startswith("image/") else "file",
+                "item_id": item_id,
+                "file_field": field,
+                "filename": upload.get("name") or item_id,
+            })
+        if not content:
+            raise InvalidRequest("nothing to inspect", public_detail="nothing to inspect")
+
+        chosen = model if model in self.settings.allowed_models else self.model
         manifest = Manifest.model_validate({
-            "purpose": purpose, "model": self.model,
-            "messages": [{"role": "user", "content": [
-                {"type": "text", "item_id": "prompt-1", "text": text}]}],
+            "purpose": purpose, "model": chosen,
+            "messages": [{"role": "user", "content": content}],
         })
-        normalized = self.normalizer.normalize(manifest, {}, self.parser_limits)
+        normalized = self.normalizer.normalize(manifest, files, self.parser_limits)
         await self.scopes.admit_turn(
             scope, files=normalized.file_count, byte_count=normalized.total_bytes
         )
@@ -220,7 +254,18 @@ class Gateway:
             "request_id": context.request_id,
             "input": text,
             "purpose": purpose,
-            "model": self.model,
+            "model": chosen,
+            "attachments": [
+                {
+                    "item_id": item.item_id,
+                    "filename": item.filename,
+                    "bytes": item.byte_size,
+                    "detected_mime": item.detected_mime,
+                    "declared_type": item.item_type.value,
+                }
+                for item in normalized.items
+                if item.is_attachment
+            ],
         }
         try:
             response = await self.orchestrator.process(context, normalized, trace=recorder)
@@ -279,6 +324,8 @@ class Handler(BaseHTTPRequestHandler):
                 "external": {
                     "base_url": self.gateway.settings.external_base_url,
                     "model": self.gateway.model,
+                    "models": sorted(self.gateway.settings.allowed_models),
+                    "vision_models": sorted(self.gateway.settings.vision_models),
                     "reasoning": self.gateway.settings.external_reasoning,
                 },
                 "policy_version": self.gateway.orchestrator.deps.policy.version,
@@ -287,11 +334,17 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found"})
 
+    MAX_BODY_BYTES = 64 * 1024 * 1024
+
     def do_POST(self) -> None:  # noqa: N802
         if self.path != "/api/trace":
             self._json(404, {"error": "not found"})
             return
         length = int(self.headers.get("Content-Length", "0"))
+        if length > self.MAX_BODY_BYTES:
+            self._json(413, {"error": "payload too large",
+                             "message": f"body exceeds {self.MAX_BODY_BYTES} bytes"})
+            return
         try:
             payload = json.loads(self.rfile.read(length))
         except json.JSONDecodeError:
@@ -303,6 +356,8 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("text") or "",
                     payload.get("purpose") or "general",
                     payload.get("scope_id") or None,
+                    payload.get("files") or [],
+                    payload.get("model"),
                 ),
                 timeout=self.gateway.settings.request_deadline_seconds + 30,
             )

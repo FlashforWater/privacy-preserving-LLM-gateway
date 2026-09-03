@@ -167,6 +167,7 @@ def build_application(settings: Settings) -> Application:
         allowed_models=settings.allowed_models,
         timeout_seconds=settings.external_timeout_seconds,
         reasoning=settings.external_reasoning,
+        vision_models=settings.vision_models,
     )
 
     orchestrator = Orchestrator(

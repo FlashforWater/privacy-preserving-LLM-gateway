@@ -90,6 +90,9 @@
       <option value="medical_report_analysis">medical_report_analysis（放行医疗内容）</option>
     </select>
     <label><input type="checkbox" id="samescope" /> 复用上一个 scope（测跨轮共指）</label>
+    <label>外部模型 <select id="model"></select></label>
+    <label>附件 <input type="file" id="files" multiple
+      accept=".pdf,.docx,.xlsx,.png,.jpg,.jpeg,.txt" /></label>
     <button id="run">运行</button>
     <button class="ghost" id="reset">重置样例</button>
     <span class="kv" id="scopeinfo"></span>
@@ -107,6 +110,14 @@ const markTokens = s => esc(s).replace(TOKEN_RE, m => '<span class="tok">' + m +
 fetch("/api/config").then(r => r.json()).then(c => {
   CFG = c;
   $("#input").value = c.sample;
+  const sel = $("#model");
+  for (const m of (c.external.models || [c.external.model])) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m + ((c.external.vision_models || []).includes(m) ? "（支持图片）" : "");
+    sel.appendChild(opt);
+  }
+  sel.value = c.external.model;
   $("#cfg").innerHTML =
     "本地检测 <b>" + esc(c.local_model.model) + "</b>（推理" +
       (c.local_model.thinking_disabled ? "关" : "开") + " · " + esc(c.local_model.prompt) + "）<br>" +
@@ -126,7 +137,9 @@ $("#run").onclick = async () => {
       body: JSON.stringify({
         text: $("#input").value,
         purpose: $("#purpose").value,
-        scope_id: $("#samescope").checked ? lastScope : null
+        scope_id: $("#samescope").checked ? lastScope : null,
+        model: $("#model").value || null,
+        files: await readFiles()
       })
     });
     const data = await res.json();
@@ -147,6 +160,28 @@ $("#run").onclick = async () => {
 };
 
 const stageBy = (d, n) => (d.stages || []).find(s => s.name === n);
+
+async function readFiles() {
+  const input = $("#files");
+  const chosen = input && input.files ? Array.from(input.files) : [];
+  return Promise.all(chosen.map(f => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("读取失败：" + f.name));
+    // dataURL 是 "data:<mime>;base64,<payload>"，取逗号之后的部分。
+    reader.onload = () => resolve({ name: f.name,
+      b64: String(reader.result).split(",", 2)[1] || "" });
+    reader.readAsDataURL(f);
+  })));
+}
+
+const bytes = n => n < 1024 ? n + " B"
+  : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB";
+
+// 与后端 ACTION_PRECEDENCE 同序：由宽到严。
+const ACTION_ORDER = ["PASS", "TOKENIZE", "REDACT",
+  "LOCAL_ANALYZE_TO_SANITIZED_TEXT", "LOCAL_ONLY", "BLOCK"];
+const strictestOf = actions =>
+  actions.slice().sort((a, b) => ACTION_ORDER.indexOf(a) - ACTION_ORDER.indexOf(b)).pop() || "-";
 
 function panel(num, title, ms, inner, open) {
   return '<details class="stage" ' + (open ? "open" : "") + '>' +
@@ -184,17 +219,44 @@ function highlight(text, findings) {
 function render(d) {
   const insp = stageBy(d, "inspect"), pol = stageBy(d, "policy"),
         rt = stageBy(d, "route"), ext = stageBy(d, "external"), rest = stageBy(d, "restore");
-  const item = (insp && insp.data.items && insp.data.items[0]) || {};
-  const findings = item.findings || [];
+  const items = (insp && insp.data.items) || [];
+  const byId = Object.fromEntries(items.map(i => [i.item_id, i]));
+  const findings = items.reduce((a, i) => a.concat(i.findings || []), []);
+  const attachments = d.attachments || [];
   let html = "";
 
-  html += panel(1, "原始输入（本地）", null,
-    '<p class="hint">高亮的是检测层认为的敏感片段。用途 <b>' + esc(d.purpose) + "</b>。</p><pre>" +
-    (findings.length ? highlight(d.input, findings) : esc(d.input)) + "</pre>", true);
+  // 阶段 1：文本按 span 高亮；附件显示解析出来的文本，同样高亮
+  let inputHtml = "";
+  const textItem = byId["prompt-1"];
+  if (d.input && d.input.trim()) {
+    inputHtml += "<pre>" + (textItem && textItem.findings.length
+      ? highlight(d.input, textItem.findings) : esc(d.input)) + "</pre>";
+  }
+  for (const a of attachments) {
+    const it = byId[a.item_id] || {};
+    const parsedText = it.normalized_text || "";
+    inputHtml += '<p class="hint">附件 <b>' + esc(a.filename) + "</b> · " + bytes(a.bytes) +
+      " · " + esc(a.detected_mime) + " · 解析器 " + esc(it.parser || "-") +
+      (it.image_class ? " · 分类 " + esc(it.image_class) : "") +
+      (it.fully_inspected === false ? ' · <span class="err">未完成检查</span>' : "") + "</p>" +
+      (parsedText
+        ? "<pre>" + (it.findings && it.findings.length
+            ? highlight(parsedText, it.findings) : esc(parsedText)) + "</pre>"
+        : '<p class="hint">未提取到文本' +
+          (it.image_class ? "（图片按分类路由，不靠文本）" : "") + "。</p>");
+  }
 
-  const rows = findings.map(f => {
+  html += panel(1, "原始输入（本地）· " + (attachments.length
+      ? attachments.length + " 个附件" : "纯文本"), null,
+    '<p class="hint">高亮的是检测层认为的敏感片段。用途 <b>' + esc(d.purpose) + "</b>。</p>" +
+    (inputHtml || '<p class="hint">无内容。</p>'), true);
+
+  const multi = items.length > 1;
+  const rows = items.flatMap(it => (it.findings || []).map(f => {
     const isModel = f.source === "local_model";
-    return "<tr><td><code>" + esc(f.entity_type) + "</code></td>" +
+    return "<tr>" +
+      (multi ? "<td><code>" + esc(it.item_id) + "</code></td>" : "") +
+      "<td><code>" + esc(f.entity_type) + "</code></td>" +
       '<td><span class="tag ' + (isModel ? "src-model" : "src-rule") + '">' +
         (isModel ? "模型" : "规则") + "</span></td>" +
       "<td><code>" + esc(f.rule_id || "-") + "</code></td>" +
@@ -202,27 +264,37 @@ function render(d) {
       "<td>" + (f.start != null ? f.start + ":" + f.end : "-") +
         (f.relocated ? ' <span class="kv">(重定位)</span>' : "") + "</td>" +
       "<td><code>" + esc(f.text) + "</code></td></tr>";
-  }).join("");
+  })).join("");
 
   html += panel(2, "检测证据 · " + findings.length + " 条", insp && insp.duration_ms,
     '<p class="hint">两路并行。<span class="tag src-rule">规则</span> 正则+校验位+字段标签；' +
     '<span class="tag src-model">模型</span> 本地小模型，偏移由网关自己在原文中定位，不信模型给的数字。' +
-    (item.fully_inspected === false ? ' <span class="err">此材料未完成检查</span>' : "") + "</p>" +
+    (items.some(i => i.fully_inspected === false)
+      ? ' <span class="err">有材料未完成检查</span>' : "") + "</p>" +
     (findings.length
-      ? "<table><tr><th>类型</th><th>来源</th><th>规则</th><th>置信度</th><th>span</th><th>命中原文</th></tr>" + rows + "</table>"
+      ? "<table><tr>" + (multi ? "<th>材料</th>" : "") +
+        "<th>类型</th><th>来源</th><th>规则</th><th>置信度</th><th>span</th><th>命中原文</th></tr>" +
+        rows + "</table>"
       : '<p class="hint">未发现任何敏感实体。</p>'), true);
 
-  const pitem = pol && pol.data.items && pol.data.items[0];
-  const drows = ((pitem && pitem.decisions) || []).map(x =>
-    "<tr><td><code>" + esc(x.entity_type || "-") + "</code></td>" +
-    '<td><span class="tag a-' + esc(x.action) + '">' + esc(x.action) + "</span></td>" +
-    "<td><code>" + esc(x.policy_rule_id) + "</code></td>" +
-    '<td class="kv">' + esc(x.reason_code) + "</td></tr>").join("");
+  const pitems = (pol && pol.data.items) || [];
+  const pitem = pitems[0];
+  const decisionTables = pitems.map(pi =>
+    (pitems.length > 1
+      ? '<p class="hint"><code>' + esc(pi.item_id) + '</code> → <span class="tag a-' +
+        esc(pi.effective_action) + '">' + esc(pi.effective_action) + "</span></p>" : "") +
+    "<table><tr><th>实体</th><th>动作</th><th>命中规则</th><th>理由码</th></tr>" +
+    (pi.decisions || []).map(x =>
+      "<tr><td><code>" + esc(x.entity_type || "-") + "</code></td>" +
+      '<td><span class="tag a-' + esc(x.action) + '">' + esc(x.action) + "</span></td>" +
+      "<td><code>" + esc(x.policy_rule_id) + "</code></td>" +
+      '<td class="kv">' + esc(x.reason_code) + "</td></tr>").join("") + "</table>").join("");
 
-  html += panel(3, "策略决策 · 最终 " + (pitem ? pitem.effective_action : "-"), pol && pol.duration_ms,
+  html += panel(3, "策略决策 · 最终 " +
+      (pitems.length ? strictestOf(pitems.map(i => i.effective_action)) : "-"),
+    pol && pol.duration_ms,
     '<p class="hint">检测层只产出证据，动作只由策略引擎决定；同一材料多条决策时取最严的一条。策略版本 <b>' +
-    esc(pol && pol.data.policy_version) + "</b>。</p>" +
-    "<table><tr><th>实体</th><th>动作</th><th>命中规则</th><th>理由码</th></tr>" + drows + "</table>", true);
+    esc(pol && pol.data.policy_version) + "</b>。</p>" + decisionTables, true);
 
   const STOPPED = "请求在此之前已终止，本阶段没有运行。";
   if (rt) {
@@ -279,8 +351,11 @@ function render(d) {
     const s = rest.data;
     const unattributed = s.tokens_issued > 0 && s.tokens_seen === 0;
     html += panel(7, "反解（代码查表，不调模型）", rest.duration_ms,
-      '<p class="hint">发出 ' + (s.tokens_issued || 0) + " 个占位符，回来 " + s.tokens_seen +
-      " 个，还原 " + s.tokens_restored + " 个，无法识别 " + s.unknown_tokens + " 个" +
+      // tokens_issued 数的是不同的占位符，tokens_seen 数的是出现次数，
+      // 同一个人被提到三次就是 3。措辞要分清，否则"回来"比"发出"多会像是编造。
+      '<p class="hint">发出 ' + (s.tokens_issued || 0) + " 个占位符；回复中出现 " +
+      s.tokens_seen + " 处，还原 " + s.tokens_restored + " 处，无法识别 " +
+      s.unknown_tokens + " 处" +
       (s.unknown_tokens ? "（原样保留，不猜）" : "") + "。</p>" +
       (unattributed
         ? '<p class="hint err">模型一个标记都没用，回答里的结论无法归属到具体的人。' +
@@ -300,8 +375,8 @@ function render(d) {
 
   if (d.status === "failed") {
     // 指出具体是哪条决策拦的。只说"策略不允许"会让人去翻策略文件猜。
-    const culprits = ((pitem && pitem.decisions) || [])
-      .filter(x => x.action === "BLOCK" || x.action === "LOCAL_ONLY");
+    const culprits = pitems.flatMap(pi => (pi.decisions || [])
+      .filter(x => x.action === "BLOCK" || x.action === "LOCAL_ONLY"));
     const seen = new Set();
     const rows = culprits.filter(x => {
       const k = x.entity_type + x.policy_rule_id;

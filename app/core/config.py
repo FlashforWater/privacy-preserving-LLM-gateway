@@ -126,6 +126,18 @@ class Settings(BaseSettings):
     # cases was assessed by reading a handful of answers, not measured. Decide it
     # with the Phase 2 evaluation set, not from this note.
     external_reasoning: Literal["provider_default", "disabled"] = "provider_default"
+    # Models on the allow-list that accept image parts. Empty means the check is
+    # off — the provider decides, and rejects with a 400 after the bytes have
+    # already crossed the boundary for nothing. Listing them moves that refusal
+    # to before the call, which is both a clearer error and one less pointless
+    # transmission of an approved image.
+    external_vision_models: str = ""
+
+    @property
+    def vision_models(self) -> frozenset[str]:
+        return frozenset(
+            m.strip() for m in self.external_vision_models.split(",") if m.strip()
+        )
 
     dev_static_tokens: str = ""
 

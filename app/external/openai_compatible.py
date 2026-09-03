@@ -44,6 +44,7 @@ class OpenAICompatibleAdapter:
         allowed_models: frozenset[str],
         timeout_seconds: float = 60.0,
         reasoning: str = "provider_default",
+        vision_models: frozenset[str] = frozenset(),
         retry: RetryPolicy | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -52,6 +53,7 @@ class OpenAICompatibleAdapter:
         self._allowed_models = allowed_models
         self._timeout = timeout_seconds
         self._reasoning = reasoning
+        self._vision_models = vision_models
         self._retry = retry or RetryPolicy()
         self._client = client
 
@@ -77,6 +79,17 @@ class OpenAICompatibleAdapter:
         if request.model not in self._allowed_models:
             raise Forbidden(
                 "model not in allow-list", public_detail="requested model is not permitted"
+            )
+
+        # An approved image sent to a text-only model is refused by the provider
+        # after the bytes have already left. Refusing here keeps the transmission
+        # from happening and says why, instead of surfacing an opaque 400.
+        binary = request.binary_parts()
+        if binary and self._vision_models and request.model not in self._vision_models:
+            raise Forbidden(
+                f"model {request.model} is not configured to accept images",
+                public_detail="the requested model does not accept attachments of this kind",
+                meta={"attachment_count": str(len(binary))},
             )
 
         payload = self._to_provider_format(request)
@@ -114,9 +127,17 @@ class OpenAICompatibleAdapter:
         try:
             return await with_retry(attempt, policy=self._retry, deadline=deadline)
         except httpx.HTTPStatusError as exc:
-            # Status category only. Provider error bodies can echo our input.
+            # Status category only: provider error bodies can echo our input, so
+            # they are never surfaced. The hint is derived from what *we* sent,
+            # which is safe to talk about and is usually the answer.
+            hint = ""
+            if exc.response.status_code == httpx.codes.BAD_REQUEST and request.binary_parts():
+                hint = (
+                    "; the request carried image parts — the model may not accept them "
+                    "(set EXTERNAL_VISION_MODELS to refuse before sending)"
+                )
             raise ExternalProviderError(
-                f"provider returned HTTP {exc.response.status_code}",
+                f"provider returned HTTP {exc.response.status_code}{hint}",
                 public_detail="external provider error",
                 meta={"provider_status": str(exc.response.status_code)},
             ) from exc
