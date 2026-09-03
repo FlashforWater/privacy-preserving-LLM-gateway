@@ -155,6 +155,14 @@ function panel(num, title, ms, inner, open) {
     '</summary><div class="body">' + inner + "</div></details>";
 }
 
+// 没执行过的阶段必须画成没执行过。用空数据按正常阶段渲染，读出来会是
+// "无阻断项""0 个占位符"——那读起来像一切正常，而实际请求已经被拦下了。
+function skipped(num, title, why) {
+  return '<details class="stage"><summary><span class="num">' + num + "</span>" +
+    title + '<span class="ms">未执行</span></summary>' +
+    '<div class="body"><p class="hint">' + esc(why) + "</p></div></details>";
+}
+
 // 按 span 切片拼接。重叠的丢弃后面那个，因为合并层已保证 span 不重叠。
 function highlight(text, findings) {
   const spans = findings.filter(f => f.start != null).sort((a, b) => a.start - b.start);
@@ -216,27 +224,39 @@ function render(d) {
     esc(pol && pol.data.policy_version) + "</b>。</p>" +
     "<table><tr><th>实体</th><th>动作</th><th>命中规则</th><th>理由码</th></tr>" + drows + "</table>", true);
 
-  const blockers = (rt && rt.data.blockers) || [];
-  html += panel(4, "路由 · " + (rt && rt.data.path === "fast" ? "快速通道（原样外发）" : "脱敏通道"),
-    rt && rt.duration_ms,
-    '<p class="hint">快速通道只在「每一项都完成检查且什么都没发现」时打开。本次未走快速通道的原因：</p>' +
-    (blockers.length ? "<pre>" + esc(blockers.join("\n")) + "</pre>" : '<p class="hint">无阻断项。</p>'));
+  const STOPPED = "请求在此之前已终止，本阶段没有运行。";
+  if (rt) {
+    const blockers = rt.data.blockers || [];
+    html += panel(4, "路由 · " + (rt.data.path === "fast" ? "快速通道（原样外发）" : "脱敏通道"),
+      rt.duration_ms,
+      '<p class="hint">快速通道只在「每一项都完成检查且什么都没发现」时打开。' +
+      (blockers.length ? "本次未走快速通道的原因：</p><pre>" + esc(blockers.join("\n")) + "</pre>"
+                       : "本次没有任何阻断项。</p>"));
+  } else {
+    html += skipped(4, "路由", STOPPED);
+  }
 
   html += '<div class="boundary">信 任 边 界 · 以下是外部唯一能看到的内容</div>';
 
-  const outbound = (rt && rt.data.outbound) || {};
-  const parts = (outbound.messages || []).reduce((a, m) => a.concat(m.parts || []), []);
-  html += panel(5, "外发 payload", null,
-    '<p class="hint">共 ' + ((outbound.issued_tokens || []).length) +
-    " 个占位符。注意这里没有案件 ID、没有时间戳、没有原始文件名。</p>" +
-    parts.map(p => p.kind === "text"
-      ? "<pre>" + markTokens(p.text) + "</pre>"
-      : "<pre>[" + esc(p.kind) + "] " + esc(p.item_id) + " · " + esc(p.mime_type) +
-        " · " + p.bytes + " 字节 · " + esc(p.note) + "</pre>").join("") +
-    (((rt && rt.data.withheld_item_ids) || []).length
-      ? '<p class="hint err">已扣留：' + esc(rt.data.withheld_item_ids.join(", ")) + "</p>" : ""), true);
+  if (rt && rt.data.outbound) {
+    const outbound = rt.data.outbound;
+    const parts = (outbound.messages || []).reduce((a, m) => a.concat(m.parts || []), []);
+    html += panel(5, "外发 payload", null,
+      '<p class="hint">共 ' + ((outbound.issued_tokens || []).length) +
+      " 个占位符。注意这里没有案件 ID、没有时间戳、没有原始文件名。</p>" +
+      parts.map(p => p.kind === "text"
+        ? "<pre>" + markTokens(p.text) + "</pre>"
+        : "<pre>[" + esc(p.kind) + "] " + esc(p.item_id) + " · " + esc(p.mime_type) +
+          " · " + p.bytes + " 字节 · " + esc(p.note) + "</pre>").join("") +
+      ((rt.data.withheld_item_ids || []).length
+        ? '<p class="hint err">已扣留：' + esc(rt.data.withheld_item_ids.join(", ")) + "</p>" : ""), true);
+  } else {
+    html += skipped(5, "外发 payload", "什么都没有外发。" + STOPPED);
+  }
 
-  if (ext) {
+  if (!ext) {
+    html += skipped(6, "外部模型响应", "外部模型没有被调用。" + STOPPED);
+  } else {
     const u = ext.data.usage || {};
     const reasoning = (u.completion_tokens_details || {}).reasoning_tokens;
     html += panel(6, "外部模型响应（含占位符）", ext.duration_ms,
@@ -249,7 +269,9 @@ function render(d) {
 
   html += '<div class="boundary">信 任 边 界 · 以下回到本地</div>';
 
-  if (rest) {
+  if (!rest) {
+    html += skipped(7, "反解", "没有需要反解的内容。" + STOPPED);
+  } else {
     const s = rest.data;
     html += panel(7, "反解（代码查表，不调模型）", rest.duration_ms,
       '<p class="hint">出现 ' + s.tokens_seen + " 个占位符，还原 " + s.tokens_restored +
@@ -268,9 +290,26 @@ function render(d) {
       : '<p class="hint">本次未产生映射。</p>');
 
   if (d.status === "failed") {
+    // 指出具体是哪条决策拦的。只说"策略不允许"会让人去翻策略文件猜。
+    const culprits = ((pitem && pitem.decisions) || [])
+      .filter(x => x.action === "BLOCK" || x.action === "LOCAL_ONLY");
+    const seen = new Set();
+    const rows = culprits.filter(x => {
+      const k = x.entity_type + x.policy_rule_id;
+      if (seen.has(k)) return false;
+      seen.add(k); return true;
+    }).map(x => "<tr><td><code>" + esc(x.entity_type || "-") + "</code></td>" +
+      '<td><span class="tag a-' + esc(x.action) + '">' + esc(x.action) + "</span></td>" +
+      "<td><code>" + esc(x.policy_rule_id) + "</code></td></tr>").join("");
+    const hasMedical = culprits.some(x => x.entity_type === "MEDICAL_DATA");
     html += panel("!", "请求终止 · " + esc(d.error.code), null,
-      '<p class="err">' + esc(d.error.detail) + "</p><pre>" + esc(d.error.message) + "</pre>" +
-      '<p class="hint">这是 fail-closed：外部模型没有收到任何内容，上面的阶段解释了原因。</p>', true);
+      '<p class="err">' + esc(d.error.detail) + "</p>" +
+      (rows ? "<p class=\"hint\">触发拦截的决策：</p><table><tr><th>实体</th><th>动作</th><th>命中规则</th></tr>" +
+        rows + "</table>" : "<pre>" + esc(d.error.message) + "</pre>") +
+      (hasMedical && d.purpose !== "medical_report_analysis"
+        ? '<p class="hint">策略对 MEDICAL_DATA 默认 BLOCK。用途选 <b>medical_report_analysis</b> ' +
+          "可放行医疗内容，直接标识符仍会被替换。</p>" : "") +
+      '<p class="hint">这是 fail-closed：外部模型没有收到任何内容。</p>', true);
   }
 
   $("#out").innerHTML = html;

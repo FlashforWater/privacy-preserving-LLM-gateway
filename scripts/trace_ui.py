@@ -202,7 +202,7 @@ class Gateway:
             # error to hide: the stages recorded before it explain the decision.
             result["status"] = "failed"
             result["error"] = {"code": exc.code, "detail": exc.public_detail,
-                               "message": str(exc)}
+                               "message": str(exc), "meta": dict(exc.meta)}
         result["stages"] = recorder.to_json_obj()
         result["scope_privacy_mode"] = scope.privacy_mode.value
         result["mappings"] = await self._mappings(scope.scope_id)
