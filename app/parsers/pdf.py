@@ -124,7 +124,7 @@ class PdfParser:
 
         return ParsedItem(
             item_id=item.item_id,
-            normalized_text=_render(segments, item.filename),
+            normalized_text=_render(segments),
             segments=segments,
             page_count=len(pages),
             fully_inspected=not uninspected_pages,
@@ -190,8 +190,8 @@ def _metadata_text(reader: object) -> str:
     )
 
 
-def _render(segments: list[ExtractedSegment], filename: str | None) -> str:
-    lines = [f"[DOCUMENT file={filename or 'document.pdf'}]"]
+def _render(segments: list[ExtractedSegment]) -> str:
+    lines = ["[DOCUMENT]"]
     for segment in segments:
         header = f"[{segment.label}" + (f" {segment.page}]" if segment.page else "]")
         lines.append(header)

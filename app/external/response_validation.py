@@ -11,13 +11,23 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.errors import ExternalProviderError
-from app.domain.responses import ExternalModelResponse, ExternalTextField
+from app.domain.responses import (
+    ExternalModelResponse,
+    ExternalTextField,
+    ExternalToolCall,
+)
 
 MAX_RESPONSE_CHARS = 400_000
 MAX_TEXT_FIELDS = 32
+MAX_TOOL_CALLS = 32
 
 
 def validate(response: ExternalModelResponse) -> ExternalModelResponse:
+    if len(response.tool_calls) > MAX_TOOL_CALLS:
+        raise ExternalProviderError(
+            "provider returned too many tool calls",
+            public_detail="external provider returned an unexpected response",
+        )
     if len(response.text_fields) > MAX_TEXT_FIELDS:
         raise ExternalProviderError(
             "provider returned too many text fields",
@@ -51,6 +61,7 @@ def parse_openai_chat_completion(payload: Any, *, model: str) -> ExternalModelRe
         )
 
     fields: list[ExternalTextField] = []
+    tool_calls: list[ExternalToolCall] = []
     finish_reason: str | None = None
     for index, choice in enumerate(choices):
         if not isinstance(choice, dict):
@@ -59,6 +70,20 @@ def parse_openai_chat_completion(payload: Any, *, model: str) -> ExternalModelRe
         message = choice.get("message")
         if not isinstance(message, dict):
             continue
+        for call_index, raw_call in enumerate(message.get("tool_calls") or []):
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            tool_calls.append(
+                ExternalToolCall(
+                    id=str(raw_call.get("id") or f"call_{index}_{call_index}"),
+                    name=str(function.get("name") or ""),
+                    arguments=str(function.get("arguments") or ""),
+                )
+            )
+
         content = message.get("content")
         if isinstance(content, str):
             fields.append(ExternalTextField(path=f"choices[{index}].message.content", text=content))
@@ -78,7 +103,10 @@ def parse_openai_chat_completion(payload: Any, *, model: str) -> ExternalModelRe
     # whole budget reasoning, returned content="", and the gateway reported a
     # completed request whose answer was nothing at all. A caller cannot tell
     # that apart from a model that declined to answer.
-    if not any(field.text.strip() for field in fields):
+    # A reply that asks for a tool has no prose and is not empty. Treating it as
+    # empty is how tool calling broke before this branch existed: the gateway
+    # raised "no text content" and the agent lost the call entirely.
+    if not tool_calls and not any(field.text.strip() for field in fields):
         # A reasoning model spends the output budget on deliberation before it
         # writes anything, so an exhausted budget looks exactly like a model that
         # had nothing to say. Naming the cause saves an operator from debugging
@@ -104,6 +132,7 @@ def parse_openai_chat_completion(payload: Any, *, model: str) -> ExternalModelRe
         ExternalModelResponse(
             model=str(payload.get("model") or model),
             text_fields=fields,
+            tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
         )

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass, field
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,8 +35,14 @@ class ManifestItem(BaseModel):
 class ManifestMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    role: str = Field(pattern=r"^(system|user|assistant)$")
+    # "tool" carries the result of a tool the agent ran. It is content like any
+    # other and is inspected like any other: a directory listing or a file read
+    # comes back full of real paths and names, and a gateway that only inspects
+    # the first turn protects nothing after it.
+    role: str = Field(pattern=r"^(system|user|assistant|tool)$")
     content: list[ManifestItem] = Field(min_length=1)
+    #: Links a tool result back to the call that produced it.
+    tool_call_id: str | None = Field(default=None, max_length=128)
 
 
 class RequestOptions(BaseModel):
@@ -58,6 +65,14 @@ class Manifest(BaseModel):
     messages: list[ManifestMessage] = Field(min_length=1)
     options: RequestOptions = Field(default_factory=RequestOptions)
     client_conversation_id: str | None = Field(default=None, max_length=128)
+    #: Tool definitions, forwarded to the provider unchanged. They are inspected
+    #: but never rewritten: a definition is developer-authored structure, and
+    #: tokenizing a JSON schema would corrupt it. If protected content turns up
+    #: in one — an enum of real filenames, say — the request is refused, because
+    #: that is a bug in whatever built the schema rather than something to paper
+    #: over silently.
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
 
     def items(self) -> list[ManifestItem]:
         return [item for message in self.messages for item in message.content]

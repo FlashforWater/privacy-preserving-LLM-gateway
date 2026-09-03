@@ -91,7 +91,7 @@ class XlsxParser:
                         )
                     )
 
-        body = _render(segments, item.filename)
+        body = _render(segments)
         return ParsedItem(
             item_id=item.item_id,
             normalized_text=body,
@@ -180,8 +180,8 @@ def _all_text(root: Element) -> str:
     return "\n".join(chunk.strip() for chunk in root.itertext() if chunk and chunk.strip())
 
 
-def _render(segments: list[ExtractedSegment], filename: str | None) -> str:
-    lines = [f"[DOCUMENT file={filename or 'workbook.xlsx'}]"]
+def _render(segments: list[ExtractedSegment]) -> str:
+    lines = ["[DOCUMENT]"]
     for segment in segments:
         lines.append(f"[{segment.label} origin={segment.origin}]")
         lines.append(segment.text)

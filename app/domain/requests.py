@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -113,6 +114,12 @@ class _BaseOutboundRequest(BaseModel):
     #: need an exemption from that invariant. Keeping it separate means the
     #: exemption does not exist.
     system_prompt: str = ""
+    #: Forwarded verbatim after inspection; see Manifest.tools.
+    tools: tuple[dict[str, Any], ...] = ()
+    tool_choice: str | dict[str, Any] | None = None
+    #: item_id → the opaque reference the model sees. Returned to the caller so a
+    #: tool call naming M3 can be resolved back to a real file.
+    material_refs: dict[str, str] = Field(default_factory=dict)
 
     def item_ids(self) -> tuple[str, ...]:
         return tuple(part.item_id for message in self.messages for part in message.parts)

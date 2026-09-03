@@ -135,6 +135,44 @@ and counted in `gateway_unknown_tokens_total`.
 
 ---
 
+## Tool calling
+
+An agent that sorts uploaded files needs the model to name one file, call a tool,
+and have the agent act on it. Three of the four directions cannot be passed
+through untouched.
+
+**Tool definitions** are forwarded verbatim, but inspected first. They are
+developer-authored structure, so they are never rewritten — tokenizing a JSON
+schema would corrupt it. A schema whose `enum` lists real filenames is refused
+instead, because that is a bug in whatever built it rather than something to
+paper over.
+
+**Tool calls** cannot be passed through: the model writes gateway tokens into
+arguments, and an unresolved token is not a filename anyone can open. Arguments
+are restored exactly like prose, so the caller can hand them straight to the
+tool.
+
+**Tool results** cannot be passed through either. A directory listing comes back
+full of real paths, and a gateway that inspects only the first turn protects
+nothing after it. Send them back as `role: "tool"` messages and they are
+inspected like any other content.
+
+**Materials are referenced by an opaque handle**, not by filename:
+
+```
+system : 本次请求包含以下材料…  - M1：文件（application/pdf）  - M2：图片（image/png）
+model  : move_material({"ref": "M1", "folder": "证件"})
+caller : privacy.material_refs → {"M1": "report-1", "M2": "photo-1"}
+```
+
+The filename is the piece of a claims upload most likely to name a person
+outright — 身份证-张伟.jpg — and it used to travel in the extracted text, written
+there by the gateway itself and so never seen by detection. It no longer does.
+References live in the gateway's system prompt rather than as a prefix on the
+user's content, because the fast path exists to forward that content unmodified.
+
+---
+
 ## Scopes
 
 The gateway generates `scope_id`; the business system stores and replays it.

@@ -182,6 +182,10 @@ class OpenAICompatibleAdapter:
             # un-restored output has no safe failure mode.
             "stream": False,
         }
+        if request.tools:
+            payload["tools"] = list(request.tools)
+            if request.tool_choice is not None:
+                payload["tool_choice"] = request.tool_choice
         payload.update(self._reasoning_kwargs())
         return payload
 

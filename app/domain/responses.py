@@ -21,17 +21,37 @@ class ExternalTextField(BaseModel):
     text: str
 
 
+class ExternalToolCall(BaseModel):
+    """A tool the model asked the caller to run.
+
+    ``arguments`` is the provider's JSON string, kept as a string rather than
+    parsed: it is model-written text that may contain gateway tokens, and
+    restoration works on text. Parsing it here would mean re-serializing after
+    restoration, which is a second chance to change something the caller then
+    has to trust.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    arguments: str = ""
+
+
 class ExternalModelResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str
     text_fields: list[ExternalTextField] = Field(default_factory=list)
+    tool_calls: list[ExternalToolCall] = Field(default_factory=list)
     finish_reason: str | None = None
     #: Token accounting only; never provider payload bodies.
     usage: dict[str, int] = Field(default_factory=dict)
 
     def total_text_length(self) -> int:
-        return sum(len(field.text) for field in self.text_fields)
+        return sum(len(field.text) for field in self.text_fields) + sum(
+            len(call.arguments) for call in self.tool_calls
+        )
 
 
 class RestorationStats(BaseModel):
@@ -61,6 +81,9 @@ class PrivacySummary(BaseModel):
     policy_version: str
     actions: dict[str, int] = Field(default_factory=dict)
     withheld_item_ids: list[str] = Field(default_factory=list)
+    #: The reference the model saw, mapped back to the caller's own item id.
+    #: Without it a tool call naming M3 cannot be resolved to a file.
+    material_refs: dict[str, str] = Field(default_factory=dict)
 
 
 class GatewayResponse(BaseModel):

@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 
 from app.core.deadlines import Deadline
-from app.core.enums import ForwardPath, PolicyAction, RequestState
+from app.core.enums import ContentItemType, ForwardPath, PolicyAction, RequestState
 from app.core.errors import ContentBlocked, GatewayError, InspectionFailedClosed
 from app.core.logging import content_fingerprint, pseudonymous_id, safe_extra
 from app.detectors.base import DetectorUnavailable
@@ -205,6 +205,12 @@ class Orchestrator:
             )
             trace.end()
 
+        # Tool definitions cross the boundary too. They are developer-authored
+        # structure, so they are checked and never rewritten: tokenizing a JSON
+        # schema would corrupt it, and an enum of real filenames in a schema is a
+        # bug in whatever built it rather than something to paper over.
+        self._assert_tools_are_clean(context)
+
         # --- policy ----------------------------------------------------
         context.advance(RequestState.POLICY_EVALUATED)
         if trace is not None:
@@ -381,6 +387,13 @@ class Orchestrator:
                     {"type": "text", "text": field.text}
                     for field in outcome.response.text_fields
                 ],
+                # Arguments have had their tokens restored, so the caller can
+                # hand them straight to the tool.
+                "tool_calls": [
+                    {"id": call.id, "name": call.name, "arguments": call.arguments}
+                    for call in outcome.response.tool_calls
+                ],
+                "finish_reason": outcome.response.finish_reason,
             },
             privacy=PrivacySummary(
                 path=path,
@@ -388,10 +401,37 @@ class Orchestrator:
                 policy_version=decisions.policy_version,
                 actions=decisions.action_counts(),
                 withheld_item_ids=list(decisions.withheld_item_ids()),
+                # ref → item_id, so a tool call naming M3 resolves to a real file.
+                material_refs={
+                    ref: item_id
+                    for item_id, ref in getattr(outbound, "material_refs", {}).items()
+                },
             ),
         )
 
     # ------------------------------------------------------------------
+
+    def _assert_tools_are_clean(self, context: RequestContext) -> None:
+        tools = context.manifest.tools
+        if not tools:
+            return
+        import json
+
+        blob = json.dumps(tools, ensure_ascii=False)
+        item = ContentItem(
+            item_id="_tools", item_type=ContentItemType.TEXT, message_index=0,
+            position=0, role="system", text=blob, detected_mime="text/plain",
+        )
+        parsed = ParsedItem(item_id="_tools", normalized_text=blob, fully_inspected=True)
+        findings = self._deps.regex_detector.detect(item, parsed)
+        findings += self._deps.keyword_detector.detect(item, parsed)
+        if findings:
+            kinds = sorted({f.entity_type.value for f in findings})
+            raise ContentBlocked(
+                f"tool definitions contain protected content: {kinds}",
+                public_detail="tool definitions contain protected content",
+                meta={"entity_types": kinds},
+            )
 
     async def _inspect_item(
         self, item: ContentItem, context: RequestContext

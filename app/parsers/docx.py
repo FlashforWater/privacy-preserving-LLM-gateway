@@ -91,7 +91,7 @@ class DocxParser:
             )
             for part in parts
         ]
-        body = _render(segments, item.filename)
+        body = _render(segments)
         fully_inspected = not uninspectable and not media
 
         return ParsedItem(
@@ -124,13 +124,19 @@ def _properties_text(root: object) -> str:
     return "\n".join(chunks)
 
 
-def _render(segments: list[ExtractedSegment], filename: str | None) -> str:
+def _render(segments: list[ExtractedSegment]) -> str:
     """Structured text representation (guide §11.3).
 
     The delimiters let the external model see document structure while making it
     obvious that the content is quoted data, not instructions.
+
+    The filename is deliberately absent. It used to be in this header, and it is
+    the one piece of a claims upload most likely to name a person outright —
+    身份证-张伟.docx — while bypassing detection entirely, because the gateway
+    wrote it rather than finding it in the document. Materials are identified to
+    the model by an opaque reference instead; see gateway/request_builder.
     """
-    lines = [f"[DOCUMENT file={filename or 'document.docx'}]"]
+    lines = ["[DOCUMENT]"]
     for segment in segments:
         lines.append(f"[{segment.label}]")
         lines.append(segment.text)

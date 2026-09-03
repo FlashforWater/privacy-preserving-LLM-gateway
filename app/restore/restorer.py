@@ -25,7 +25,12 @@ from dataclasses import dataclass, field
 
 from app.core.errors import ExternalProviderError
 from app.domain.requests import RequestContext
-from app.domain.responses import ExternalModelResponse, ExternalTextField, RestorationStats
+from app.domain.responses import (
+    ExternalModelResponse,
+    ExternalTextField,
+    ExternalToolCall,
+    RestorationStats,
+)
 from app.vault.base import Vault
 
 from .token_scanner import MAX_OUTPUT_CHARS, MAX_SUBSTITUTIONS, scan, unique_tokens
@@ -53,8 +58,14 @@ class Restorer:
         # One lookup per distinct token across the whole response, not per
         # occurrence: a repeated token must not multiply vault reads.
         distinct: dict[str, str | None] = {}
-        for field_ in response.text_fields:
-            for token in unique_tokens(field_.text):
+        # Tool arguments are model-written text like any other, and a token left
+        # unresolved in them is worse than one left in prose: the caller feeds
+        # arguments to a real function, and "[[PGW_V1_PERSON_K7M4Q2Z9F8N3]]" is
+        # not a filename anyone can open.
+        for text in [f.text for f in response.text_fields] + [
+            c.arguments for c in response.tool_calls
+        ]:
+            for token in unique_tokens(text):
                 distinct.setdefault(token, None)
 
         for token in list(distinct):
@@ -65,7 +76,28 @@ class Restorer:
             )
 
         restored_fields: list[ExternalTextField] = []
+        restored_calls: list[ExternalToolCall] = []
         seen = restored = unknown = substitutions = 0
+
+        def substitute(text: str) -> str:
+            nonlocal seen, restored, unknown, substitutions
+            occurrences = scan(text)
+            seen += len(occurrences)
+            result = text
+            for occurrence in sorted(occurrences, key=lambda o: o.start, reverse=True):
+                original = distinct.get(occurrence.token)
+                if original is None:
+                    unknown += 1
+                    continue
+                if substitutions >= MAX_SUBSTITUTIONS:
+                    raise ExternalProviderError(
+                        "provider response exceeded the substitution limit",
+                        public_detail="external provider returned an unexpected response",
+                    )
+                result = result[: occurrence.start] + original + result[occurrence.end :]
+                substitutions += 1
+                restored += 1
+            return result
 
         for field_ in response.text_fields:
             occurrences = scan(field_.text)
@@ -87,10 +119,18 @@ class Restorer:
                 restored += 1
             restored_fields.append(ExternalTextField(path=field_.path, text=text))
 
+        for call in response.tool_calls:
+            restored_calls.append(
+                ExternalToolCall(
+                    id=call.id, name=call.name, arguments=substitute(call.arguments)
+                )
+            )
+
         return RestorationOutcome(
             response=ExternalModelResponse(
                 model=response.model,
                 text_fields=restored_fields,
+                tool_calls=restored_calls,
                 finish_reason=response.finish_reason,
                 usage=response.usage,
             ),

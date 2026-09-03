@@ -56,6 +56,24 @@ UNTRUSTED_CONTENT_FRAMING = (
 #: why restoration tolerates absence rather than requiring completeness: a model
 #: that legitimately has nothing to say about a particular person should not fail
 #: the request.
+def material_manifest(items: list[tuple[str, str]]) -> str:
+    """Declare the materials and their references in the system prompt.
+
+    The references live here rather than as a prefix on each content block,
+    because prefixing would modify the user's text — and the fast path exists
+    precisely to forward that text unmodified (guide §14.1). Gateway-authored
+    framing belongs in the system message; user content stays untouched.
+    """
+    lines = [
+        "本次请求包含以下材料，按下面的顺序出现在用户消息中：",
+        *(f"- {ref}：{description}" for ref, description in items),
+        "",
+        "需要指代某份材料时（包括调用工具时），使用它的编号，不要用「第一个文件」",
+        "「那份 PDF」之类的说法，也不要编造文件名。你看不到真实文件名，这是正常的；",
+        "编号足以唯一指代一份材料。",
+    ]
+    return "\n".join(lines)
+
 MARKER_PRESERVATION = (
     "材料中形如 [[PGW_V1_PERSON_ABC123]] 的双花括号标记是实体占位符，代表被隐去的"
     "姓名、证件号、地址等信息。\n"
@@ -68,12 +86,41 @@ MARKER_PRESERVATION = (
 )
 
 
-def system_prompt_for(*, sanitized: bool) -> str:
+def material_ref(index: int) -> str:
+    """Opaque per-request handle for one content item.
+
+    The model needs to name a specific file — "M3 is an invoice, move it" — and
+    the obvious handle, the filename, is the one piece of a claims upload most
+    likely to name a person outright (身份证-张伟.jpg). The reference is assigned
+    by the gateway and returned to the caller, who maps it back.
+    """
+    return f"M{index}"
+
+
+def system_prompt_for(
+    *, sanitized: bool, materials: list[tuple[str, str]] | None = None
+) -> str:
     """Assemble the gateway's framing for one outbound request."""
     parts = [UNTRUSTED_CONTENT_FRAMING]
+    if materials:
+        parts.append(material_manifest(materials))
     if sanitized:
         parts.append(MARKER_PRESERVATION)
     return "\n\n".join(parts)
+
+
+def describe_materials(
+    normalized: NormalizedRequest, refs: dict[str, str]
+) -> list[tuple[str, str]]:
+    """Reference plus a non-identifying description, in request order."""
+    out: list[tuple[str, str]] = []
+    for item in normalized.items:
+        if item.item_type is ContentItemType.TEXT:
+            description = "文本"
+        else:
+            description = f"{item.item_type.value}（{item.detected_mime or '未知类型'}）"
+        out.append((refs[item.item_id], description))
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,10 +224,19 @@ def assert_original_forward_allowed(
     return FastPathVerdict(allowed=not blockers, blockers=tuple(dict.fromkeys(blockers)))
 
 
+def assign_material_refs(normalized: NormalizedRequest) -> dict[str, str]:
+    """item_id → opaque reference, in the caller's own ordering."""
+    return {
+        item.item_id: material_ref(index)
+        for index, item in enumerate(normalized.items, start=1)
+    }
+
+
 def build_original_request(
     context: RequestContext, normalized: NormalizedRequest
 ) -> OriginalApprovedRequest:
     """Fast path: the user's own text and bytes, in their own order."""
+    refs = assign_material_refs(normalized)
     messages: list[OutboundMessage] = []
     for index, message in enumerate(context.manifest.messages):
         parts: list[OutboundPart] = []
@@ -188,7 +244,9 @@ def build_original_request(
             if item.message_index != index:
                 continue
             if item.item_type is ContentItemType.TEXT:
-                parts.append(OutboundTextPart(item_id=item.item_id, text=item.text or ""))
+                parts.append(
+                    OutboundTextPart(item_id=item.item_id, text=item.text or "")
+                )
             elif item.data is not None:
                 parts.append(
                     OutboundBinaryPart(
@@ -209,7 +267,12 @@ def build_original_request(
         temperature=context.manifest.options.temperature,
         max_output_tokens=context.manifest.options.max_output_tokens,
         path=ForwardPath.FAST,
-        system_prompt=system_prompt_for(sanitized=False),
+        system_prompt=system_prompt_for(
+            sanitized=False, materials=describe_materials(normalized, refs)
+        ),
+        tools=tuple(context.manifest.tools or ()),
+        tool_choice=context.manifest.tool_choice,
+        material_refs=refs,
     )
 
 
@@ -218,6 +281,7 @@ def build_sanitized_request(
     normalized: NormalizedRequest,
     sanitization: SanitizationResult,
 ) -> SanitizedModelRequest:
+    refs = assign_material_refs(normalized)
     parts_by_item = sanitization.parts_by_item()
     messages: list[OutboundMessage] = []
     for index, message in enumerate(context.manifest.messages):
@@ -226,8 +290,9 @@ def build_sanitized_request(
             if item.message_index != index:
                 continue
             part = parts_by_item.get(item.item_id)
-            if part is not None:
-                parts.append(part)
+            if part is None:
+                continue
+            parts.append(part)
         messages.append(OutboundMessage(role=message.role, parts=tuple(parts)))
 
     return SanitizedModelRequest(
@@ -239,7 +304,12 @@ def build_sanitized_request(
         max_output_tokens=context.manifest.options.max_output_tokens,
         path=ForwardPath.SANITIZED,
         issued_tokens=sanitization.issued_tokens,
-        system_prompt=system_prompt_for(sanitized=True),
+        system_prompt=system_prompt_for(
+            sanitized=True, materials=describe_materials(normalized, refs)
+        ),
+        tools=tuple(context.manifest.tools or ()),
+        tool_choice=context.manifest.tool_choice,
+        material_refs=refs,
     )
 
 
