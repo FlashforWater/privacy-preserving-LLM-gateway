@@ -73,6 +73,15 @@ def parse_openai_chat_completion(payload: Any, *, model: str) -> ExternalModelRe
                         )
                     )
 
+    if not fields:
+        # A reasoning model returns content=null while thinking, and a provider
+        # that truncates mid-thought returns nothing usable. Silently handing the
+        # caller an empty answer hides a broken call; make it visible instead.
+        raise ExternalProviderError(
+            "provider response contained no text content",
+            public_detail="external provider returned an unexpected response",
+        )
+
     usage_raw = payload.get("usage")
     usage: dict[str, int] = {}
     if isinstance(usage_raw, dict):

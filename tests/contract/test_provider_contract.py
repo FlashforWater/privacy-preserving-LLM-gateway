@@ -209,3 +209,48 @@ class TestRetry:
                 policy=RetryPolicy(max_attempts=5, base_delay_seconds=10.0),
                 deadline=Deadline.after(0.01),
             )
+
+
+class TestReasoningModelResponses:
+    """A reasoning model puts its chain of thought in a separate field and leaves
+    ``content`` null until it finishes. Both halves of that need handling."""
+
+    def test_null_content_is_an_error_not_an_empty_answer(self) -> None:
+        with pytest.raises(ExternalProviderError):
+            parse_openai_chat_completion(
+                {
+                    "model": "model-a",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "length",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "reasoning": "still thinking...",
+                            },
+                        }
+                    ],
+                },
+                model="model-a",
+            )
+
+    def test_reasoning_field_is_never_treated_as_output(self) -> None:
+        """Only declared text fields are restored; a reasoning trace is not one."""
+        response = parse_openai_chat_completion(
+            {
+                "model": "model-a",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "the answer",
+                            "reasoning": "internal deliberation",
+                        },
+                    }
+                ],
+            },
+            model="model-a",
+        )
+        assert [field.text for field in response.text_fields] == ["the answer"]

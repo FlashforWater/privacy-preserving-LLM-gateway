@@ -21,9 +21,12 @@ Definitions:
   categories above. Use this rather than guessing a category.
 
 Rules:
-- start and end are character offsets into the exact text given to you.
-- text must equal input[start:end] character for character.
-- Report each span once. Do not merge adjacent spans of different types.
+- text must be copied from the input character for character, including
+  punctuation and spacing. This is the field that matters: the gateway locates
+  your text in the document itself and ignores any string it cannot find.
+- start and end are your best estimate of the character offsets. They are a hint;
+  do not spend effort counting characters, and never alter the text to fit them.
+- Report each distinct string once. Do not merge adjacent spans of different types.
 - Output at most 200 entities. If there are more, report the highest-confidence ones.
 - Return {"entities": []} when you find nothing.
 

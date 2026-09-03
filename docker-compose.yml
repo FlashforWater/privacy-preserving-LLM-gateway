@@ -19,7 +19,8 @@ services:
       EXTERNAL_BASE_URL: http://fake-external:9100/v1
       EXTERNAL_API_KEY: fake-key
       EXTERNAL_ALLOWED_MODELS: model-a,model-b,external-vlm-model
-      LOCAL_MODEL_BASE_URL: http://local-model:8000/v1
+      # LOCAL_MODEL_* comes from .env — the detection model runs on its own
+      # server and is not part of this stack.
       OCR_BACKEND: none
       ENABLE_PAYLOAD_LOGGING: "false"
       ENABLE_STREAMING: "false"
@@ -70,14 +71,9 @@ services:
     ports:
       - "127.0.0.1:9100:9100"
 
-  local-model:
-    # CPU-friendly placeholder for the local detection assistant. Replace the
-    # image and model with the GPU service in docker-compose.gpu.yml.
-    profiles: ["cpu-model"]
-    image: ghcr.io/ggml-org/llama.cpp:server
-    command: ["--host", "0.0.0.0", "--port", "8000", "-hf", "Qwen/Qwen2.5-3B-Instruct-GGUF"]
-    ports:
-      - "127.0.0.1:8000:8000"
+  # No local-model service: detection runs against an existing server, set
+  # through LOCAL_MODEL_BASE_URL in .env. docker-compose.gpu.yml adds a
+  # self-hosted one for when that moves in-house.
 
 volumes:
   postgres-data:

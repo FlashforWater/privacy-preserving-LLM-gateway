@@ -154,6 +154,48 @@ admission, before any parsing or model time is spent.
 
 ---
 
+## The local detection model
+
+The gateway needs a local instruction model to find entities that have no shape —
+names, addresses, organisations. It talks to any OpenAI-compatible endpoint:
+
+```dotenv
+LOCAL_MODEL_BASE_URL=http://your-host/vllm/v1   # mind the path prefix
+LOCAL_MODEL_NAME=Qwen3.8                        # case-sensitive
+LOCAL_MODEL_API_KEY=...                         # in .env, never in .env.example
+LOCAL_MODEL_DISABLE_THINKING=true
+```
+
+Verify the endpoint before wiring it in:
+
+```bash
+make check-model
+```
+
+That checks reachability, the exact model id, native `json_schema` support,
+whether the reasoning switch is honoured, and runs a real detection call whose
+spans are validated the way the gateway validates them.
+
+Two things measurement on a live Qwen3.8 changed in this codebase:
+
+* **Reasoning models return `content: null` while they think.** Detection gains
+  nothing from deliberation and a truncated answer means an incomplete entity
+  list, so thinking is turned off through the chat template, and both `null`
+  content and `finish_reason: "length"` are treated as detector failures rather
+  than as "nothing found".
+* **The model identifies entities well and counts characters badly.** Its `text`
+  is treated as a claim and located in the document by the gateway; its offsets
+  are only a hint. See
+  [ADR 0005](docs/adr/0005-locate-model-spans-in-the-document.md) — on the
+  measured sample this moved recall from 1/6 to 6/6 with no hallucination
+  accepted.
+
+**This endpoint sits inside the trust boundary.** It receives unsanitized content
+— OCR text, document bodies, identifiers in the clear — because the whole
+sanitization chain runs after it. Keep it on a private network.
+
+---
+
 ## Configuration
 
 `.env.example` documents every key. Production refuses to start when any of these

@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     local_model_name: str = "local-instruct-model"
     local_model_timeout_seconds: float = 20.0
     local_model_api_key: str = "EMPTY"
+    # Reasoning models emit a chain of thought before any content. For span
+    # detection that is pure cost and a truncation risk, so it is disabled by
+    # default via the chat template. Set false for a server that rejects the
+    # parameter; the detector then needs a larger token budget.
+    local_model_disable_thinking: bool = True
+    local_model_max_tokens: int = 4096
 
     ocr_backend: Literal["local", "none"] = "local"
     ocr_timeout_seconds: float = 30.0

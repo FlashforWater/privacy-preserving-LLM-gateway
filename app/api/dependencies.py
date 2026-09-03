@@ -156,6 +156,8 @@ def build_application(settings: Settings) -> Application:
         model=settings.local_model_name,
         api_key=settings.local_model_api_key,
         timeout_seconds=settings.local_model_timeout_seconds,
+        disable_thinking=settings.local_model_disable_thinking,
+        max_tokens=settings.local_model_max_tokens,
     )
 
     adapter = OpenAICompatibleAdapter(

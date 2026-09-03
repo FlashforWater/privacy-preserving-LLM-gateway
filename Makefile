@@ -69,6 +69,10 @@ fmt: ## Apply formatting
 smoke: ## Exercise safe, sanitized, blocked and closed-scope paths against a running gateway
 	$(BIN)/python scripts/smoke_test.py http://localhost:8080 dev-token-1
 
+.PHONY: check-model
+check-model: ## Verify the local detection model endpoint before wiring it in
+	$(BIN)/python scripts/check_local_model.py
+
 .PHONY: fake-provider
 fake-provider: ## Run the recording fake provider locally
 	$(BIN)/python scripts/fake_external.py

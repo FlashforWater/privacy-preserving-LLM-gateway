@@ -41,6 +41,12 @@ PROMPT_PATH = Path(__file__).parent / "prompts" / "entity_detection_v1.txt"
 MAX_ENTITIES = 200
 MAX_RESPONSE_BYTES = 256_000
 MAX_SPAN_LENGTH = 512
+#: Shortest claim we will locate in the document. Below this a string matches
+#: almost anywhere and is never a direct identifier by itself.
+MIN_CLAIM_LENGTH = 2
+#: Cap on how many occurrences of one claimed string get marked, so a claim of
+#: a very common substring cannot redact the whole document.
+MAX_OCCURRENCES_PER_CLAIM = 20
 
 ENTITY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -108,12 +114,16 @@ class OpenAICompatibleLocalModel:
         model: str,
         api_key: str = "EMPTY",
         timeout_seconds: float = 20.0,
+        disable_thinking: bool = True,
+        max_tokens: int = 4096,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key = api_key
         self._timeout = timeout_seconds
+        self._disable_thinking = disable_thinking
+        self._max_tokens = max_tokens
         self._client = client
         self._capabilities: LocalModelCapabilities | None = None
         self._prompt_template = PROMPT_PATH.read_text(encoding="utf-8")
@@ -176,6 +186,17 @@ class OpenAICompatibleLocalModel:
         self._capabilities = capabilities
         return capabilities
 
+    def _thinking_kwargs(self) -> dict[str, Any]:
+        """Chat-template switch that turns a reasoning model's thinking off.
+
+        Only sent when configured. Servers that do not know the parameter
+        generally ignore unknown ``chat_template_kwargs``; one that rejects it
+        surfaces as a probe failure rather than as silently degraded detection.
+        """
+        if not self._disable_thinking:
+            return {}
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+
     async def _probe_json_schema(self, deadline: Deadline) -> bool:
         """One tiny structured-output call. If the endpoint rejects the parameter
         we fall back to prompt-constrained JSON plus the same gateway-side
@@ -186,8 +207,12 @@ class OpenAICompatibleLocalModel:
                 json={
                     "model": self._model,
                     "messages": [{"role": "user", "content": "Return {\"entities\": []}."}],
-                    "max_tokens": 32,
+                    # Enough headroom that a reasoning model is not cut off mid
+                    # thought: a truncated probe would look like "schema not
+                    # supported" and quietly disable structured output.
+                    "max_tokens": 256,
                     "temperature": 0.0,
+                    **self._thinking_kwargs(),
                     "response_format": {
                         "type": "json_schema",
                         "json_schema": {
@@ -223,7 +248,7 @@ class OpenAICompatibleLocalModel:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.0,
-            "max_tokens": 4096,
+            "max_tokens": self._max_tokens,
         }
         if capabilities.supports_json_schema:
             payload["response_format"] = {
@@ -234,7 +259,10 @@ class OpenAICompatibleLocalModel:
                     "strict": True,
                 },
             }
-        # Never send reasoning_effort in the MVP (guide §10.3).
+        payload.update(self._thinking_kwargs())
+        # Never send reasoning_effort in the MVP (guide §10.3). The chat-template
+        # switch below is a different thing: it turns the model's chain of thought
+        # off entirely rather than tuning how much of it there is.
 
         try:
             response = await self._http().post(
@@ -255,12 +283,30 @@ class OpenAICompatibleLocalModel:
                 public_detail="local inspection unavailable",
             )
         try:
-            content = response.json()["choices"][0]["message"]["content"]
+            choice = response.json()["choices"][0]
+            content = choice["message"]["content"]
         except (KeyError, IndexError, ValueError) as exc:
             raise DetectorUnavailable(
                 "local model response had an unexpected envelope",
                 public_detail="local inspection unavailable",
             ) from exc
+
+        # A reasoning model returns content=null while it is still thinking, and
+        # a truncated answer means the entity list is incomplete. Both are
+        # detector failures, not empty results: accepting a partial list would
+        # silently under-detect, which is the one outcome this service exists to
+        # prevent.
+        if choice.get("finish_reason") == "length":
+            raise DetectorUnavailable(
+                "local model output was truncated at the token limit",
+                public_detail="local inspection unavailable",
+            )
+        if content is None:
+            raise DetectorUnavailable(
+                "local model returned no content (reasoning may be enabled without "
+                "enough token budget)",
+                public_detail="local inspection unavailable",
+            )
         return parse_entity_payload(content)
 
     def _render(self, text: str, document_type: str) -> tuple[str, str]:
@@ -275,8 +321,13 @@ class OpenAICompatibleLocalModel:
         return system_prompt, user_prompt
 
 
-def parse_entity_payload(content: str) -> list[RawEntity]:
+def parse_entity_payload(content: str | None) -> list[RawEntity]:
     """Parse and shape-check the model's JSON. Raises on anything unexpected."""
+    if not isinstance(content, str):
+        raise DetectorUnavailable(
+            "local model returned no textual content",
+            public_detail="local inspection unavailable",
+        )
     text = content.strip()
     if text.startswith("```"):
         text = "\n".join(
@@ -333,36 +384,109 @@ def parse_entity_payload(content: str) -> list[RawEntity]:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedSpan:
+    """A span the gateway has confirmed against the input itself."""
+
+    start: int
+    end: int
+    text: str
+    type: str
+    confidence: float
+    #: True when the model's own offsets were wrong and we located the text.
+    relocated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class SpanVerification:
-    accepted: list[RawEntity]
+    accepted: list[VerifiedSpan]
     rejected: int
+    relocated: int = 0
 
 
 def verify_spans(text: str, entities: list[RawEntity]) -> SpanVerification:
-    """Drop every entity whose span does not exactly reproduce the input.
+    """Confirm every entity against the input, computing offsets ourselves.
 
-    This is what makes the model's output safe to act on. Without it, a
-    hallucinated offset would tokenize an unrelated stretch of the document, and
-    a hallucinated ``text`` would let the model choose what we replace.
+    The model's ``text`` is treated as a *claim about what the document contains*
+    and nothing more. A claim is accepted only if that exact string really occurs
+    in the input, and the offsets we act on are the ones we found — never the ones
+    the model reported.
+
+    Why not simply require ``input[start:end] == text``, as the specification's
+    prompt contract suggests? Because measurement against a live vLLM-served
+    Qwen3.8 showed the model identifies entities well and counts characters
+    badly: of six correct entities in a four-line document, one had usable
+    offsets and five drifted, the error growing with position. Rejecting on
+    offset mismatch discarded five real identifiers — an address, a doctor's
+    name, a hospital and two clinical values — which would then have travelled to
+    the external model untouched. That is exactly the failure this service exists
+    to prevent, and it would have looked like "the detector found nothing".
+
+    The safety property is not weakened by locating the text ourselves; it is
+    strengthened. Under the offset rule we trusted the model's arithmetic. Here we
+    trust only a claim we verify directly: *does this exact string occur in the
+    document?* A hallucinated entity has no occurrence and is rejected.
+
+    When a claimed string occurs several times, every occurrence is marked. Over-
+    marking costs utility; under-marking discloses data.
     """
-    accepted: list[RawEntity] = []
+    allowed_types = {e.value for e in LOCAL_MODEL_ENTITIES}
+    accepted: list[VerifiedSpan] = []
     rejected = 0
+    relocated = 0
     length = len(text)
+    seen: set[tuple[int, int, str]] = set()
+
     for entity in entities:
-        if entity.type not in {e.value for e in LOCAL_MODEL_ENTITIES}:
+        if entity.type not in allowed_types:
             rejected += 1
             continue
-        if not (0 <= entity.start < entity.end <= length):
+        if len(entity.text) > MAX_SPAN_LENGTH:
             rejected += 1
             continue
-        if entity.end - entity.start > MAX_SPAN_LENGTH:
+        # Very short claims match everywhere and would redact the document into
+        # uselessness; they are also never a direct identifier on their own.
+        if len(entity.text.strip()) < MIN_CLAIM_LENGTH:
             rejected += 1
             continue
-        if text[entity.start : entity.end] != entity.text:
+
+        # Fast path: the model's offsets happen to be right.
+        if 0 <= entity.start < entity.end <= length and text[entity.start : entity.end] == entity.text:
+            key = (entity.start, entity.end, entity.type)
+            if key not in seen:
+                seen.add(key)
+                accepted.append(
+                    VerifiedSpan(entity.start, entity.end, entity.text, entity.type,
+                                 entity.confidence)
+                )
+            continue
+
+        # Otherwise locate the claimed string ourselves.
+        occurrences = _find_all(text, entity.text)
+        if not occurrences:
             rejected += 1
             continue
-        accepted.append(entity)
-    return SpanVerification(accepted=accepted, rejected=rejected)
+        relocated += 1
+        for start in occurrences[:MAX_OCCURRENCES_PER_CLAIM]:
+            key = (start, start + len(entity.text), entity.type)
+            if key in seen:
+                continue
+            seen.add(key)
+            accepted.append(
+                VerifiedSpan(start, start + len(entity.text), entity.text, entity.type,
+                             entity.confidence, relocated=True)
+            )
+
+    accepted.sort(key=lambda span: (span.start, -span.end))
+    return SpanVerification(accepted=accepted, rejected=rejected, relocated=relocated)
+
+
+def _find_all(haystack: str, needle: str) -> list[int]:
+    out: list[int] = []
+    start = haystack.find(needle)
+    while start != -1 and len(out) <= MAX_OCCURRENCES_PER_CLAIM:
+        out.append(start)
+        start = haystack.find(needle, start + 1)
+    return out
 
 
 class LocalModelDetector:
@@ -385,18 +509,23 @@ class LocalModelDetector:
         )
         verification = verify_spans(text, raw)
         findings: list[Finding] = []
-        for entity in verification.accepted:
+        for span in verification.accepted:
             findings.append(
                 Finding(
                     item_id=item.item_id,
-                    entity_type=EntityType(entity.type),
+                    entity_type=EntityType(span.type),
                     source=FindingSource.LOCAL_MODEL,
-                    start=entity.start,
-                    end=entity.end,
-                    confidence=clamp_confidence(entity.confidence),
+                    start=span.start,
+                    end=span.end,
+                    confidence=clamp_confidence(span.confidence),
                     rule_id="local_model_v1",
-                    raw_text=text[entity.start : entity.end],
-                    metadata={"rejected_spans": verification.rejected},
+                    # Sliced from the document, never taken from the model's
+                    # reply: the model chooses what to point at, not what we cut.
+                    raw_text=text[span.start : span.end],
+                    metadata={
+                        "rejected_claims": verification.rejected,
+                        "relocated": span.relocated,
+                    },
                 )
             )
         return findings
