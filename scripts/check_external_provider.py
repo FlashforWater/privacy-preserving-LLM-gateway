@@ -141,10 +141,20 @@ async def main() -> int:
                  f"{reasoning_tokens} of {usage.get('completion_tokens')} completion tokens "
                  "spent deliberating")
 
-        if choice.get("finish_reason") == "length" and not content:
+        if choice.get("finish_reason") == "length":
+            # Truncation is worth failing on even when some text came back: the
+            # answer is cut off mid-thought, and on a reasoning provider the
+            # budget is usually gone before the answer starts.
             failures += 1
             line(BAD, "output budget",
-                 f"{budget} tokens consumed without producing content; raise max_output_tokens")
+                 f"{budget} tokens exhausted (finish_reason=length)" +
+                 ("; no content produced at all" if not content.strip()
+                  else "; the answer is truncated") +
+                 " — raise max_output_tokens or set EXTERNAL_REASONING=disabled")
+            return 1
+        if not content.strip():
+            failures += 1
+            line(BAD, "content", "provider returned an empty answer")
             return 1
         line(OK, "chat completion", f"{usage.get('completion_tokens')} completion tokens")
 

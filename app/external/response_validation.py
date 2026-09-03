@@ -73,7 +73,12 @@ def parse_openai_chat_completion(payload: Any, *, model: str) -> ExternalModelRe
                         )
                     )
 
-    if not fields:
+    # "No content" means no *usable* content. An earlier version tested only for
+    # a missing field, which let an empty string through: the provider spent its
+    # whole budget reasoning, returned content="", and the gateway reported a
+    # completed request whose answer was nothing at all. A caller cannot tell
+    # that apart from a model that declined to answer.
+    if not any(field.text.strip() for field in fields):
         # A reasoning model spends the output budget on deliberation before it
         # writes anything, so an exhausted budget looks exactly like a model that
         # had nothing to say. Naming the cause saves an operator from debugging

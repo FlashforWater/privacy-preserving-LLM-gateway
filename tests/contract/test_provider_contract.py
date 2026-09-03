@@ -356,3 +356,62 @@ class TestReasoningSwitch:
     async def test_disabled_sends_the_switch(self) -> None:
         body = await self._captured_body(reasoning="disabled")
         assert body["reasoning_effort"] == "none"
+
+
+class TestEmptyContentIsNotAnAnswer:
+    """Observed live: deepseek-v4-flash spent all 4000 tokens reasoning about a
+    claims document and returned ``content: ""`` with ``finish_reason: length``.
+
+    The first version of this guard only tested for a *missing* field, so an
+    empty string sailed through and the gateway reported a completed request
+    whose answer was nothing. A caller cannot distinguish that from a model that
+    chose not to answer.
+    """
+
+    def test_empty_string_content_is_rejected(self) -> None:
+        with pytest.raises(ExternalProviderError) as exc:
+            parse_openai_chat_completion(
+                {
+                    "model": "model-a",
+                    "choices": [
+                        {"index": 0, "finish_reason": "length",
+                         "message": {"role": "assistant", "content": ""}}
+                    ],
+                },
+                model="model-a",
+            )
+        assert "max_output_tokens" in str(exc.value)
+
+    def test_whitespace_only_content_is_rejected(self) -> None:
+        with pytest.raises(ExternalProviderError):
+            parse_openai_chat_completion(
+                {
+                    "model": "model-a",
+                    "choices": [
+                        {"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "   \n\n  "}}
+                    ],
+                },
+                model="model-a",
+            )
+
+    def test_content_parts_that_are_all_empty_are_rejected(self) -> None:
+        with pytest.raises(ExternalProviderError):
+            parse_openai_chat_completion(
+                {
+                    "model": "model-a",
+                    "choices": [
+                        {"index": 0, "message": {"role": "assistant", "content": [
+                            {"type": "text", "text": ""}, {"type": "text", "text": " "}]}}
+                    ],
+                },
+                model="model-a",
+            )
+
+    def test_real_content_still_passes(self) -> None:
+        response = parse_openai_chat_completion(
+            {"model": "model-a", "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "结论：吻合。"}}]},
+            model="model-a",
+        )
+        assert response.text_fields[0].text == "结论：吻合。"
