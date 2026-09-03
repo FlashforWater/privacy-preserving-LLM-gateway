@@ -39,6 +39,7 @@ from app.domain.findings import Finding, InspectionResult
 from app.domain.requests import (
     NormalizedRequest,
     OriginalApprovedRequest,
+    OutboundTextPart,
     RequestContext,
     SanitizedModelRequest,
 )
@@ -55,6 +56,7 @@ from app.sanitization.tokenizer import new_token
 from app.vault.base import Vault
 
 from .evidence_merger import merge
+from .trace import TraceRecorder
 from .request_builder import (
     assert_no_withheld_or_blocked_content,
     assert_original_forward_allowed,
@@ -93,8 +95,17 @@ class Orchestrator:
         return self._deps
 
     async def process(
-        self, context: RequestContext, normalized: NormalizedRequest
+        self,
+        context: RequestContext,
+        normalized: NormalizedRequest,
+        trace: TraceRecorder | None = None,
     ) -> GatewayResponse:
+        """Run one request end to end.
+
+        ``trace`` is a development-only inspection hook (see gateway/trace.py).
+        It is ``None`` on every production path, and when it is None this method
+        allocates nothing extra and behaves identically.
+        """
         started = time.monotonic()
         audit = AuditRecord(
             request_id=context.request_id,
@@ -108,7 +119,7 @@ class Orchestrator:
         )
         path = ForwardPath.SANITIZED
         try:
-            response = await self._process_inner(context, normalized, audit)
+            response = await self._process_inner(context, normalized, audit, trace)
             path = response.privacy.path
             audit.outcome = "completed"
             return response
@@ -132,6 +143,7 @@ class Orchestrator:
         context: RequestContext,
         normalized: NormalizedRequest,
         audit: AuditRecord,
+        trace: TraceRecorder | None = None,
     ) -> GatewayResponse:
         deps = self._deps
 
@@ -141,6 +153,8 @@ class Orchestrator:
         inspections: dict[str, InspectionResult] = {}
         findings_by_item: dict[str, list[Finding]] = {}
 
+        if trace is not None:
+            trace.begin("inspect")
         for item in normalized.items:
             context.deadline.check("inspection")
             parsed_item, inspection, findings = await self._inspect_item(item, context)
@@ -153,8 +167,47 @@ class Orchestrator:
                     entity_type=finding.entity_type.value, source=finding.source.value
                 ).inc()
 
+        if trace is not None:
+            trace.record(
+                items=[
+                    {
+                        "item_id": item.item_id,
+                        "type": item.item_type.value,
+                        "detected_mime": item.detected_mime,
+                        "parser": parsed[item.item_id].parser_name,
+                        "fully_inspected": parsed[item.item_id].fully_inspected,
+                        "image_class": (
+                            parsed[item.item_id].image_class.value
+                            if parsed[item.item_id].image_class
+                            else None
+                        ),
+                        "normalized_text": parsed[item.item_id].normalized_text,
+                        "notes": dict(parsed[item.item_id].inspection_notes),
+                        "findings": [
+                            {
+                                "finding_id": str(f.finding_id),
+                                "entity_type": f.entity_type.value,
+                                "source": f.source.value,
+                                "rule_id": f.rule_id,
+                                "confidence": round(f.confidence, 3),
+                                "start": f.start,
+                                "end": f.end,
+                                "text": f.raw_text,
+                                "relocated": bool(f.metadata.get("relocated")),
+                                "contributing_sources": list(f.contributing_sources),
+                            }
+                            for f in findings_by_item[item.item_id]
+                        ],
+                    }
+                    for item in normalized.items
+                ]
+            )
+            trace.end()
+
         # --- policy ----------------------------------------------------
         context.advance(RequestState.POLICY_EVALUATED)
+        if trace is not None:
+            trace.begin("policy")
         decisions = deps.policy.evaluate(
             purpose=context.manifest.purpose,
             items=normalized.items,
@@ -168,6 +221,29 @@ class Orchestrator:
                 metrics.policy_actions_total.labels(
                     action=decision.action.value, reason_code=decision.reason_code
                 ).inc()
+
+        if trace is not None:
+            trace.record(
+                policy_version=decisions.policy_version,
+                items=[
+                    {
+                        "item_id": d.item_id,
+                        "effective_action": d.effective_action.value,
+                        "decisions": [
+                            {
+                                "finding_id": str(pd.finding_id) if pd.finding_id else None,
+                                "entity_type": pd.entity_type.value if pd.entity_type else None,
+                                "action": pd.action.value,
+                                "policy_rule_id": pd.policy_rule_id,
+                                "reason_code": pd.reason_code,
+                            }
+                            for pd in d.decisions
+                        ],
+                    }
+                    for d in decisions.items
+                ],
+            )
+            trace.end()
 
         if decisions.blocks_required_request_content():
             context.advance(RequestState.BLOCKED)
@@ -190,6 +266,14 @@ class Orchestrator:
             allowed_purposes=context.principal.allowed_purposes,
         )
 
+        if trace is not None:
+            trace.begin("route")
+            trace.record(
+                fast_path_allowed=verdict.allowed,
+                blockers=list(verdict.blockers),
+                scope_privacy_mode=context.scope.privacy_mode.value,
+            )
+
         outbound: OriginalApprovedRequest | SanitizedModelRequest
         if verdict.allowed:
             outbound = build_original_request(context, normalized)
@@ -209,10 +293,19 @@ class Orchestrator:
 
         assert_no_withheld_or_blocked_content(outbound, decisions)
         audit.path = path.value
+        if trace is not None:
+            trace.record(
+                path=path.value,
+                outbound=_outbound_preview(outbound),
+                withheld_item_ids=list(decisions.withheld_item_ids()),
+            )
+            trace.end()
 
         # --- forward ---------------------------------------------------
         context.advance(RequestState.FORWARDING)
         context.deadline.check("external call")
+        if trace is not None:
+            trace.begin("external")
         try:
             provider_response = await deps.adapter.complete(outbound, context.deadline)
             metrics.provider_requests_total.labels(status_category="2xx").inc()
@@ -221,8 +314,19 @@ class Orchestrator:
             context.advance(RequestState.EXTERNAL_FAILED)
             raise
 
+        if trace is not None:
+            trace.record(
+                model=provider_response.model,
+                finish_reason=provider_response.finish_reason,
+                usage=dict(provider_response.usage),
+                raw_text_fields=[f.text for f in provider_response.text_fields],
+            )
+            trace.end()
+
         # --- restore ---------------------------------------------------
         context.advance(RequestState.RESTORING)
+        if trace is not None:
+            trace.begin("restore")
         outcome = await deps.restorer.restore_text_fields(provider_response, context)
         metrics.tokens_restored_total.inc(outcome.stats.tokens_restored)
         metrics.unknown_tokens_total.inc(outcome.stats.unknown_tokens)
@@ -236,6 +340,15 @@ class Orchestrator:
                     restored_count=outcome.stats.tokens_restored,
                 ),
             )
+
+        if trace is not None:
+            trace.record(
+                tokens_seen=outcome.stats.tokens_seen,
+                tokens_restored=outcome.stats.tokens_restored,
+                unknown_tokens=outcome.stats.unknown_tokens,
+                restored_text_fields=[f.text for f in outcome.response.text_fields],
+            )
+            trace.end()
 
         context.advance(RequestState.COMPLETED)
         return GatewayResponse(
@@ -411,3 +524,36 @@ class Orchestrator:
                 )
                 if existing is not None:
                     allocator.seed(finding.entity_type, request.lookup_hmac, existing)
+
+
+def _outbound_preview(request: OriginalApprovedRequest | SanitizedModelRequest) -> dict:
+    """Serialize the outbound request for the inspection UI.
+
+    Binary parts are described, never included: the point of the view is to show
+    what crossed the boundary, and a base64 blob in a browser tab is neither
+    readable nor safe to leave lying around.
+    """
+    return {
+        "path": request.path.value,
+        "model": request.model,
+        "purpose": request.purpose,
+        "messages": [
+            {
+                "role": message.role,
+                "parts": [
+                    {"kind": "text", "item_id": part.item_id, "text": part.text}
+                    if isinstance(part, OutboundTextPart)
+                    else {
+                        "kind": part.kind.value,
+                        "item_id": part.item_id,
+                        "mime_type": part.mime_type,
+                        "bytes": len(part.data),
+                        "note": "original bytes forwarded unmodified",
+                    }
+                    for part in message.parts
+                ],
+            }
+            for message in request.messages
+        ],
+        "issued_tokens": sorted(getattr(request, "issued_tokens", frozenset())),
+    }

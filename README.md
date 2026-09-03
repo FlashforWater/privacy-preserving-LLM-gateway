@@ -321,6 +321,35 @@ restart.
 
 ---
 
+## Seeing the pipeline
+
+```bash
+make trace-ui        # http://127.0.0.1:8090
+```
+
+A local page that runs a request through the real gateway and shows every stage:
+what arrived, what each detector found and on what evidence, what policy decided
+and under which rule, what actually crossed the boundary, what came back, and
+what restoration produced. Two dashed lines mark the trust boundary so the
+outbound payload is unmistakable.
+
+It is useful for the questions that are hard to answer from logs: why a request
+did not take the fast path, why a name was missed, whether the model or a rule
+found something, whether the tokens survived the round trip.
+
+**Development only, and it refuses to start otherwise.** The page shows original
+text, matched finding values and the decrypted token mapping table — exactly what
+this service exists to keep inside. It is a script rather than a route in `app/`
+so that it cannot be switched on in a deployed service by flipping a flag, it
+binds to loopback, and `tests/unit/test_trace_hook.py` fails if anything in
+`app/` ever constructs a recorder.
+
+The trace comes from the real orchestrator through an opt-in hook, not from a
+parallel implementation. A debugging view that quietly diverges from the code is
+worse than none: it builds confidence in behaviour that is not there.
+
+---
+
 ## Testing
 
 ```bash

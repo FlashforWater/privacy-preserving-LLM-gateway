@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>脱敏网关 · 链路检视</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#161a21; --panel2:#1c212a; --line:#2a313c;
+    --fg:#e6e9ef; --dim:#8b94a3; --accent:#6ea8fe;
+    --keep:#3fb950; --token:#d29922; --redact:#f0883e; --block:#f85149;
+    --rule:#58a6ff; --model:#bc8cff;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex;
+    align-items:baseline; gap:16px; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; font-weight:600; }
+  .warn { color:var(--redact); font-size:12px; }
+  .cfg { color:var(--dim); font-size:12px; margin-left:auto; text-align:right; line-height:1.5; }
+  main { padding:20px 24px 60px; max-width:1180px; margin:0 auto; }
+  textarea { width:100%; min-height:190px; background:var(--panel); color:var(--fg);
+    border:1px solid var(--line); border-radius:8px; padding:12px; font:13px/1.7
+    ui-monospace,SFMono-Regular,Menlo,monospace; resize:vertical; }
+  .controls { display:flex; gap:12px; align-items:center; margin:12px 0 24px; flex-wrap:wrap; }
+  select,button { background:var(--panel2); color:var(--fg); border:1px solid var(--line);
+    border-radius:6px; padding:8px 14px; font-size:13px; }
+  button { background:var(--accent); color:#06121f; font-weight:600; cursor:pointer; border:none; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:var(--panel2); color:var(--fg); font-weight:400; }
+  label { color:var(--dim); font-size:12px; }
+
+  .stage { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    margin-bottom:14px; overflow:hidden; }
+  .stage > summary { padding:12px 16px; cursor:pointer; display:flex; align-items:center;
+    gap:10px; font-weight:600; list-style:none; }
+  .stage > summary::-webkit-details-marker { display:none; }
+  .stage > summary::before { content:"\25B8"; color:var(--dim); transition:transform .15s; }
+  .stage[open] > summary::before { transform:rotate(90deg); }
+  .num { width:22px; height:22px; border-radius:50%; background:var(--panel2);
+    color:var(--dim); font-size:11px; display:grid; place-items:center; flex:none; }
+  .ms { margin-left:auto; color:var(--dim); font-size:12px; font-weight:400; }
+  .body { padding:0 16px 16px; }
+
+  .boundary { margin:22px 0; text-align:center; color:var(--redact); font-size:12px;
+    letter-spacing:.16em; position:relative; }
+  .boundary::before,.boundary::after { content:""; position:absolute; top:50%; width:32%;
+    border-top:1px dashed var(--redact); }
+  .boundary::before { left:0; } .boundary::after { right:0; }
+
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th { text-align:left; color:var(--dim); font-weight:500; padding:6px 8px;
+    border-bottom:1px solid var(--line); white-space:nowrap; }
+  td { padding:6px 8px; border-bottom:1px solid #21262d; vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+  code,pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  pre { background:var(--panel2); border:1px solid var(--line); border-radius:6px;
+    padding:12px; overflow-x:auto; font-size:12.5px; white-space:pre-wrap;
+    word-break:break-word; margin:0 0 8px; }
+  .tag { display:inline-block; padding:1px 7px; border-radius:4px; font-size:11px;
+    font-weight:600; white-space:nowrap; }
+  .src-rule{ background:rgba(88,166,255,.15); color:var(--rule); }
+  .src-model{ background:rgba(188,140,255,.15); color:var(--model); }
+  .a-PASS{ background:rgba(63,185,80,.15); color:var(--keep); }
+  .a-TOKENIZE{ background:rgba(210,153,34,.15); color:var(--token); }
+  .a-REDACT{ background:rgba(240,136,62,.15); color:var(--redact); }
+  .a-BLOCK,.a-LOCAL_ONLY{ background:rgba(248,81,73,.15); color:var(--block); }
+  .a-LOCAL_ANALYZE_TO_SANITIZED_TEXT{ background:rgba(110,168,254,.15); color:var(--accent); }
+  mark.hl { background:rgba(210,153,34,.28); color:#ffd479; border-radius:3px; padding:0 2px; }
+  .tok { background:rgba(210,153,34,.2); color:#f0c674; border-radius:3px; padding:0 3px; }
+  .hint { color:var(--dim); font-size:12px; margin:0 0 10px; }
+  .err { color:var(--block); }
+  .kv { color:var(--dim); font-size:12px; }
+  .kv b, .cfg b { color:var(--fg); font-weight:600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>脱敏网关 · 链路检视</h1>
+  <span class="warn">仅限本地开发：本页显示原文、命中原值与映射表</span>
+  <div class="cfg" id="cfg"></div>
+</header>
+<main>
+  <textarea id="input" spellcheck="false"></textarea>
+  <div class="controls">
+    <label>任务用途</label>
+    <select id="purpose">
+      <option value="general">general</option>
+      <option value="medical_report_analysis">medical_report_analysis（放行医疗内容）</option>
+    </select>
+    <label><input type="checkbox" id="samescope" /> 复用上一个 scope（测跨轮共指）</label>
+    <button id="run">运行</button>
+    <button class="ghost" id="reset">重置样例</button>
+    <span class="kv" id="scopeinfo"></span>
+  </div>
+  <div id="out"></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+let CFG = null, lastScope = null;
+
+const esc = s => String(s == null ? "" : s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const TOKEN_RE = /\[\[PGW_V1_[A-Z_]+_[A-Z0-9]{12}\]\]/g;
+const markTokens = s => esc(s).replace(TOKEN_RE, m => '<span class="tok">' + m + '</span>');
+
+fetch("/api/config").then(r => r.json()).then(c => {
+  CFG = c;
+  $("#input").value = c.sample;
+  $("#cfg").innerHTML =
+    "本地检测 <b>" + esc(c.local_model.model) + "</b>（推理" +
+      (c.local_model.thinking_disabled ? "关" : "开") + " · " + esc(c.local_model.prompt) + "）<br>" +
+    "外部模型 <b>" + esc(c.external.model) + "</b>（推理 " + esc(c.external.reasoning) +
+      "）· 策略 " + esc(c.policy_version);
+});
+
+$("#reset").onclick = () => { if (CFG) $("#input").value = CFG.sample; };
+
+$("#run").onclick = async () => {
+  const btn = $("#run");
+  btn.disabled = true; btn.textContent = "运行中…";
+  $("#out").innerHTML = '<p class="hint">正在跑完整链路：解析 → 检测 → 策略 → 脱敏 → 外发 → 反解…</p>';
+  try {
+    const res = await fetch("/api/trace", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        text: $("#input").value,
+        purpose: $("#purpose").value,
+        scope_id: $("#samescope").checked ? lastScope : null
+      })
+    });
+    const data = await res.json();
+    if (data.traceback) {
+      $("#out").innerHTML = '<div class="stage"><div class="body"><p class="err">脚本异常 ' +
+        esc(data.error) + ": " + esc(data.message) + '</p><pre>' + esc(data.traceback) + '</pre></div></div>';
+      return;
+    }
+    lastScope = data.scope_id;
+    $("#scopeinfo").innerHTML = "scope <b>" + esc(data.scope_id.slice(0, 12)) + "…</b> · " +
+      esc(data.scope_privacy_mode);
+    render(data);
+  } catch (e) {
+    $("#out").innerHTML = '<p class="err">请求失败：' + esc(e.message) + "</p>";
+  } finally {
+    btn.disabled = false; btn.textContent = "运行";
+  }
+};
+
+const stageBy = (d, n) => (d.stages || []).find(s => s.name === n);
+
+function panel(num, title, ms, inner, open) {
+  return '<details class="stage" ' + (open ? "open" : "") + '>' +
+    '<summary><span class="num">' + num + "</span>" + title +
+    (ms != null ? '<span class="ms">' + ms + " ms</span>" : "") +
+    '</summary><div class="body">' + inner + "</div></details>";
+}
+
+// 按 span 切片拼接。重叠的丢弃后面那个，因为合并层已保证 span 不重叠。
+function highlight(text, findings) {
+  const spans = findings.filter(f => f.start != null).sort((a, b) => a.start - b.start);
+  const kept = [];
+  for (const f of spans) {
+    if (kept.length && f.start < kept[kept.length - 1].end) continue;
+    kept.push(f);
+  }
+  let html = "", pos = 0;
+  for (const f of kept) {
+    html += esc(text.slice(pos, f.start));
+    html += '<mark class="hl" title="' + esc(f.entity_type) + '">' +
+            esc(text.slice(f.start, f.end)) + "</mark>";
+    pos = f.end;
+  }
+  return html + esc(text.slice(pos));
+}
+
+function render(d) {
+  const insp = stageBy(d, "inspect"), pol = stageBy(d, "policy"),
+        rt = stageBy(d, "route"), ext = stageBy(d, "external"), rest = stageBy(d, "restore");
+  const item = (insp && insp.data.items && insp.data.items[0]) || {};
+  const findings = item.findings || [];
+  let html = "";
+
+  html += panel(1, "原始输入（本地）", null,
+    '<p class="hint">高亮的是检测层认为的敏感片段。用途 <b>' + esc(d.purpose) + "</b>。</p><pre>" +
+    (findings.length ? highlight(d.input, findings) : esc(d.input)) + "</pre>", true);
+
+  const rows = findings.map(f => {
+    const isModel = f.source === "local_model";
+    return "<tr><td><code>" + esc(f.entity_type) + "</code></td>" +
+      '<td><span class="tag ' + (isModel ? "src-model" : "src-rule") + '">' +
+        (isModel ? "模型" : "规则") + "</span></td>" +
+      "<td><code>" + esc(f.rule_id || "-") + "</code></td>" +
+      "<td>" + f.confidence + "</td>" +
+      "<td>" + (f.start != null ? f.start + ":" + f.end : "-") +
+        (f.relocated ? ' <span class="kv">(重定位)</span>' : "") + "</td>" +
+      "<td><code>" + esc(f.text) + "</code></td></tr>";
+  }).join("");
+
+  html += panel(2, "检测证据 · " + findings.length + " 条", insp && insp.duration_ms,
+    '<p class="hint">两路并行。<span class="tag src-rule">规则</span> 正则+校验位+字段标签；' +
+    '<span class="tag src-model">模型</span> 本地小模型，偏移由网关自己在原文中定位，不信模型给的数字。' +
+    (item.fully_inspected === false ? ' <span class="err">此材料未完成检查</span>' : "") + "</p>" +
+    (findings.length
+      ? "<table><tr><th>类型</th><th>来源</th><th>规则</th><th>置信度</th><th>span</th><th>命中原文</th></tr>" + rows + "</table>"
+      : '<p class="hint">未发现任何敏感实体。</p>'), true);
+
+  const pitem = pol && pol.data.items && pol.data.items[0];
+  const drows = ((pitem && pitem.decisions) || []).map(x =>
+    "<tr><td><code>" + esc(x.entity_type || "-") + "</code></td>" +
+    '<td><span class="tag a-' + esc(x.action) + '">' + esc(x.action) + "</span></td>" +
+    "<td><code>" + esc(x.policy_rule_id) + "</code></td>" +
+    '<td class="kv">' + esc(x.reason_code) + "</td></tr>").join("");
+
+  html += panel(3, "策略决策 · 最终 " + (pitem ? pitem.effective_action : "-"), pol && pol.duration_ms,
+    '<p class="hint">检测层只产出证据，动作只由策略引擎决定；同一材料多条决策时取最严的一条。策略版本 <b>' +
+    esc(pol && pol.data.policy_version) + "</b>。</p>" +
+    "<table><tr><th>实体</th><th>动作</th><th>命中规则</th><th>理由码</th></tr>" + drows + "</table>", true);
+
+  const blockers = (rt && rt.data.blockers) || [];
+  html += panel(4, "路由 · " + (rt && rt.data.path === "fast" ? "快速通道（原样外发）" : "脱敏通道"),
+    rt && rt.duration_ms,
+    '<p class="hint">快速通道只在「每一项都完成检查且什么都没发现」时打开。本次未走快速通道的原因：</p>' +
+    (blockers.length ? "<pre>" + esc(blockers.join("\n")) + "</pre>" : '<p class="hint">无阻断项。</p>'));
+
+  html += '<div class="boundary">信 任 边 界 · 以下是外部唯一能看到的内容</div>';
+
+  const outbound = (rt && rt.data.outbound) || {};
+  const parts = (outbound.messages || []).reduce((a, m) => a.concat(m.parts || []), []);
+  html += panel(5, "外发 payload", null,
+    '<p class="hint">共 ' + ((outbound.issued_tokens || []).length) +
+    " 个占位符。注意这里没有案件 ID、没有时间戳、没有原始文件名。</p>" +
+    parts.map(p => p.kind === "text"
+      ? "<pre>" + markTokens(p.text) + "</pre>"
+      : "<pre>[" + esc(p.kind) + "] " + esc(p.item_id) + " · " + esc(p.mime_type) +
+        " · " + p.bytes + " 字节 · " + esc(p.note) + "</pre>").join("") +
+    (((rt && rt.data.withheld_item_ids) || []).length
+      ? '<p class="hint err">已扣留：' + esc(rt.data.withheld_item_ids.join(", ")) + "</p>" : ""), true);
+
+  if (ext) {
+    const u = ext.data.usage || {};
+    const reasoning = (u.completion_tokens_details || {}).reasoning_tokens;
+    html += panel(6, "外部模型响应（含占位符）", ext.duration_ms,
+      '<p class="hint">模型 <b>' + esc(ext.data.model) + "</b> · finish=" +
+      esc(ext.data.finish_reason || "-") + " · completion " +
+      (u.completion_tokens == null ? "-" : u.completion_tokens) + " tokens" +
+      (reasoning ? "（推理 " + reasoning + "）" : "") + "</p>" +
+      (ext.data.raw_text_fields || []).map(t => "<pre>" + markTokens(t) + "</pre>").join(""), true);
+  }
+
+  html += '<div class="boundary">信 任 边 界 · 以下回到本地</div>';
+
+  if (rest) {
+    const s = rest.data;
+    html += panel(7, "反解（代码查表，不调模型）", rest.duration_ms,
+      '<p class="hint">出现 ' + s.tokens_seen + " 个占位符，还原 " + s.tokens_restored +
+      " 个，无法识别 " + s.unknown_tokens + " 个" +
+      (s.unknown_tokens ? "（原样保留，不猜）" : "") + "。</p>" +
+      (s.restored_text_fields || []).map(t => "<pre>" + esc(t) + "</pre>").join(""), true);
+  }
+
+  const maps = d.mappings || [];
+  html += panel(8, "案件映射表 · " + maps.length + " 条（仅本地）", null,
+    maps.length
+      ? "<table><tr><th>占位符</th><th>类型</th><th>原文</th></tr>" +
+        maps.map(m => "<tr><td><code>" + esc(m.token) + "</code></td><td><code>" +
+          esc(m.entity_type) + "</code></td><td>" + esc(m.original) + "</td></tr>").join("") +
+        '</table><p class="hint">同一 scope 内同一个值复用同一个占位符，这是跨轮共指的基础；scope 关闭即销毁。</p>'
+      : '<p class="hint">本次未产生映射。</p>');
+
+  if (d.status === "failed") {
+    html += panel("!", "请求终止 · " + esc(d.error.code), null,
+      '<p class="err">' + esc(d.error.detail) + "</p><pre>" + esc(d.error.message) + "</pre>" +
+      '<p class="hint">这是 fail-closed：外部模型没有收到任何内容，上面的阶段解释了原因。</p>', true);
+  }
+
+  $("#out").innerHTML = html;
+}
+</script>
+</body>
+</html>

@@ -77,6 +77,10 @@ check-model: ## Verify the local detection model endpoint before wiring it in
 check-external: ## Verify the external provider endpoint and token fidelity
 	$(BIN)/python scripts/check_external_provider.py
 
+.PHONY: trace-ui
+trace-ui: ## Local pipeline inspector at http://127.0.0.1:8090 (development only)
+	$(BIN)/python scripts/trace_ui.py
+
 .PHONY: fake-provider
 fake-provider: ## Run the recording fake provider locally
 	$(BIN)/python scripts/fake_external.py
