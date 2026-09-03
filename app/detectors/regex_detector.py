@@ -129,12 +129,21 @@ RULES: tuple[RegexRule, ...] = (
     RegexRule(
         rule_id="cn_detailed_address",
         entity_type=EntityType.ADDRESS_DETAILED,
-        # Anchored on a road/lane suffix followed by a number. A bare
-        # province or city is not detailed enough to identify anyone and is
-        # deliberately not matched.
+        # Anchored on a road/lane suffix followed by a number. A bare province
+        # or city is not detailed enough to identify anyone and is deliberately
+        # not matched.
+        #
+        # Chinese prose has no word boundaries, so an address embedded in a
+        # narrative sentence still picks up a few characters of the words in
+        # front of it ("事故发生在苏州…" yields "发生在苏州…"). The road-name
+        # segment is capped at eight characters to bound that, and the common
+        # framing particles are trimmed, but some over-capture remains. It is
+        # left rather than chased with a longer blocklist: the failure direction
+        # is safe (a slightly larger span is redacted, never a smaller one), and
+        # the local model produces a clean span for prose addresses anyway.
         pattern=_c(
             rf"(?:[{_CJK}]{{2,8}}(?:省|自治区))?(?:[{_CJK}]{{2,8}}(?:市|区|县|旗))*"
-            rf"[{_CJK}A-Za-z0-9]{{2,20}}(?:路|街|大道|巷|弄|村|镇)"
+            rf"[{_CJK}A-Za-z0-9]{{2,8}}(?:路|街|大道|巷|弄|村|镇)"
             rf"[{_CJK}A-Za-z0-9]{{0,12}}(?:号|弄|栋|幢|单元|室|层)"
         ),
         base_confidence=0.80,
