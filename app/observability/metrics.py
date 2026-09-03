@@ -69,6 +69,13 @@ tokens_restored_total = Counter(
     registry=REGISTRY,
 )
 
+unattributed_responses_total = Counter(
+    "gateway_unattributed_responses_total",
+    "Sanitized requests whose reply referenced none of the tokens sent. The "
+    "analysis may be fine, but no conclusion in it can be attributed to a person.",
+    registry=REGISTRY,
+)
+
 unknown_tokens_total = Counter(
     "gateway_unknown_tokens_total",
     "Token-shaped strings in provider responses that did not resolve. "

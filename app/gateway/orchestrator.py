@@ -330,6 +330,24 @@ class Orchestrator:
         outcome = await deps.restorer.restore_text_fields(provider_response, context)
         metrics.tokens_restored_total.inc(outcome.stats.tokens_restored)
         metrics.unknown_tokens_total.inc(outcome.stats.unknown_tokens)
+        # A reply that came back with none of the tokens it was given is not an
+        # error — restoration tolerates absence, and a model may legitimately
+        # have nothing to say about a particular person. It is worth counting,
+        # though: every conclusion in such a reply is unattributable, and a rise
+        # here means the marker instruction is not landing.
+        issued = getattr(outbound, "issued_tokens", frozenset())
+        if issued and outcome.stats.tokens_seen == 0:
+            metrics.unattributed_responses_total.inc()
+            logger.warning(
+                "gateway.restore.no_markers_returned",
+                extra=safe_extra(
+                    request_id=context.request_id,
+                    scope_id=context.scope.scope_id,
+                    token_count=len(issued),
+                    restored_count=0,
+                ),
+            )
+
         if outcome.stats.had_unknown:
             logger.warning(
                 "gateway.restore.unknown_tokens",
@@ -346,6 +364,7 @@ class Orchestrator:
                 tokens_seen=outcome.stats.tokens_seen,
                 tokens_restored=outcome.stats.tokens_restored,
                 unknown_tokens=outcome.stats.unknown_tokens,
+                tokens_issued=len(getattr(outbound, "issued_tokens", frozenset())),
                 restored_text_fields=[f.text for f in outcome.response.text_fields],
             )
             trace.end()
@@ -537,6 +556,7 @@ def _outbound_preview(request: OriginalApprovedRequest | SanitizedModelRequest) 
         "path": request.path.value,
         "model": request.model,
         "purpose": request.purpose,
+        "system_prompt": request.system_prompt,
         "messages": [
             {
                 "role": message.role,

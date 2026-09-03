@@ -107,6 +107,12 @@ class _BaseOutboundRequest(BaseModel):
     messages: tuple[OutboundMessage, ...]
     temperature: float
     max_output_tokens: int
+    #: Gateway-authored framing, prepended by the adapter as a system message.
+    #: Deliberately not an entry in ``messages``: those are user content items,
+    #: each of which must carry a policy decision, and a synthetic item would
+    #: need an exemption from that invariant. Keeping it separate means the
+    #: exemption does not exist.
+    system_prompt: str = ""
 
     def item_ids(self) -> tuple[str, ...]:
         return tuple(part.item_id for message in self.messages for part in message.parts)

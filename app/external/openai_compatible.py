@@ -128,6 +128,8 @@ class OpenAICompatibleAdapter:
 
     def _to_provider_format(self, request: OutboundRequest) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
+        if request.system_prompt:
+            messages.append({"role": "system", "content": request.system_prompt})
         for message in request.messages:
             content: list[dict[str, Any]] = []
             for part in message.parts:

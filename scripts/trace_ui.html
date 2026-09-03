@@ -244,6 +244,10 @@ function render(d) {
     html += panel(5, "外发 payload", null,
       '<p class="hint">共 ' + ((outbound.issued_tokens || []).length) +
       " 个占位符。注意这里没有案件 ID、没有时间戳、没有原始文件名。</p>" +
+      (outbound.system_prompt
+        ? '<p class="hint">网关附加的 system prompt（不是用户写的）：</p><pre>' +
+          esc(outbound.system_prompt) + "</pre>"
+        : "") +
       parts.map(p => p.kind === "text"
         ? "<pre>" + markTokens(p.text) + "</pre>"
         : "<pre>[" + esc(p.kind) + "] " + esc(p.item_id) + " · " + esc(p.mime_type) +
@@ -273,10 +277,15 @@ function render(d) {
     html += skipped(7, "反解", "没有需要反解的内容。" + STOPPED);
   } else {
     const s = rest.data;
+    const unattributed = s.tokens_issued > 0 && s.tokens_seen === 0;
     html += panel(7, "反解（代码查表，不调模型）", rest.duration_ms,
-      '<p class="hint">出现 ' + s.tokens_seen + " 个占位符，还原 " + s.tokens_restored +
-      " 个，无法识别 " + s.unknown_tokens + " 个" +
+      '<p class="hint">发出 ' + (s.tokens_issued || 0) + " 个占位符，回来 " + s.tokens_seen +
+      " 个，还原 " + s.tokens_restored + " 个，无法识别 " + s.unknown_tokens + " 个" +
       (s.unknown_tokens ? "（原样保留，不猜）" : "") + "。</p>" +
+      (unattributed
+        ? '<p class="hint err">模型一个标记都没用，回答里的结论无法归属到具体的人。' +
+          "分析本身可能是对的，但业务系统没法知道每条结论说的是谁。</p>"
+        : "") +
       (s.restored_text_fields || []).map(t => "<pre>" + esc(t) + "</pre>").join(""), true);
   }
 

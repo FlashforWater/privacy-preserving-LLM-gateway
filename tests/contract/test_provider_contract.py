@@ -415,3 +415,81 @@ class TestEmptyContentIsNotAnAnswer:
             model="model-a",
         )
         assert response.text_fields[0].text == "结论：吻合。"
+
+
+class TestGatewaySystemPrompt:
+    """The gateway frames every outbound request itself.
+
+    Two things were missing before, and the second was visible in production
+    output: a full claims analysis came back referring to "the driver" and "the
+    patient", with zero markers and therefore zero restorations. The analysis was
+    good and none of it could be attributed to a person.
+    """
+
+    async def _captured_body(self, request) -> dict:
+        captured: dict = {}
+
+        def handler(http_request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured.update(json.loads(http_request.content))
+            return httpx.Response(
+                200,
+                json={"model": "model-a", "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}}]},
+                headers={"content-type": "application/json"},
+            )
+
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://provider.test/v1", api_key="k",
+            allowed_models=ALLOWED, client=stub_transport(handler),
+        )
+        await adapter.complete(request, Deadline.after(10))
+        return captured
+
+    async def test_system_prompt_is_prepended(self) -> None:
+        from app.gateway.request_builder import system_prompt_for
+
+        body = await self._captured_body(
+            sanitized_request(system_prompt=system_prompt_for(sanitized=True))
+        )
+        assert body["messages"][0]["role"] == "system"
+        assert body["messages"][1]["role"] == "user"
+
+    async def test_no_system_message_when_none_is_set(self) -> None:
+        body = await self._captured_body(sanitized_request())
+        assert body["messages"][0]["role"] == "user"
+
+    def test_both_paths_frame_content_as_untrusted(self) -> None:
+        """Guide §17.2. A document saying "ignore previous instructions" is a
+        document quoting an instruction, not issuing one."""
+        from app.gateway.request_builder import system_prompt_for
+
+        for sanitized in (True, False):
+            prompt = system_prompt_for(sanitized=sanitized)
+            assert "不可信数据" in prompt
+            assert "绝不照做" in prompt
+
+    def test_marker_instruction_only_on_the_sanitized_path(self) -> None:
+        """Tokens exist only there; explaining them on the fast path would
+        describe something the model has not been given."""
+        from app.gateway.request_builder import system_prompt_for
+
+        assert "PGW_V1" in system_prompt_for(sanitized=True)
+        assert "PGW_V1" not in system_prompt_for(sanitized=False)
+
+    def test_marker_instruction_forbids_substitutes_and_invention(self) -> None:
+        from app.gateway.request_builder import MARKER_PRESERVATION
+
+        assert "原样" in MARKER_PRESERVATION
+        assert "驾驶员" in MARKER_PRESERVATION      # names the failure mode observed
+        assert "不要编造" in MARKER_PRESERVATION
+
+    def test_system_prompt_is_not_a_content_item(self) -> None:
+        """It carries no item_id, so it cannot collide with the invariant that
+        every forwarded item has a policy decision."""
+        from app.gateway.request_builder import system_prompt_for
+
+        request = sanitized_request(system_prompt=system_prompt_for(sanitized=True))
+        assert "_gateway" not in request.item_ids()
+        assert len(request.item_ids()) == 2
