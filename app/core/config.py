@@ -1,0 +1,223 @@
+"""Configuration, validated at import/startup.
+
+Guide §3.10 and §18: invalid policy or missing security settings must prevent the
+service from becoming ready, and production must refuse to start with placeholder
+keys, development secrets, wildcard provider hosts, or payload logging enabled.
+Those checks live in :meth:`Settings.validate_for_environment`, which
+``/health/ready`` and application startup both call.
+"""
+
+from __future__ import annotations
+
+import base64
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlparse
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .errors import ConfigurationError
+
+PLACEHOLDER_SECRETS: frozenset[str] = frozenset(
+    {
+        "development-only-placeholder",
+        "change-me",
+        "set-through-secret-manager",
+        "",
+    }
+)
+
+
+class Principal(BaseModel):
+    """An authenticated internal caller. Tenant comes from here, never from the body.
+
+    A plain model, deliberately not a settings class: a principal is constructed
+    from a verified credential at request time, and a type that also reads the
+    process environment could pick up a stray ``TENANT_ID`` and silently answer
+    for the wrong tenant.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    principal_id: str
+    tenant_id: str
+    allowed_purposes: frozenset[str]
+
+    def may_use_purpose(self, purpose: str) -> bool:
+        return purpose in self.allowed_purposes
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="forbid", frozen=True
+    )
+
+    app_env: Literal["development", "test", "staging", "production"] = "development"
+    app_host: str = "0.0.0.0"  # noqa: S104 - bound inside the container network
+    app_port: int = 8080
+    log_level: str = "INFO"
+
+    policy_file: Path = Path("config/policy.default.yaml")
+    request_deadline_seconds: float = 120.0
+    max_concurrent_requests: int = 16
+
+    database_url: str = "postgresql+asyncpg://privacy_gateway:change-me@postgres/privacy_gateway"
+    # "memory" is a development convenience. Production is forced to "postgres"
+    # by validate_for_environment; there is no way to run production on it.
+    storage_backend: Literal["memory", "postgres"] = "memory"
+    vault_master_key_b64: str = "development-only-placeholder"
+    vault_hmac_key_b64: str = "development-only-placeholder"
+
+    scope_idle_ttl_seconds: int = 7200
+    scope_absolute_ttl_seconds: int = 86400
+    scope_max_turns: int = 50
+    scope_max_files: int = 20
+    scope_max_bytes: int = 209_715_200
+    scope_max_pages: int = 200
+    scope_max_mappings: int = 5000
+    mapping_ttl_seconds: int = 86400
+
+    local_model_base_url: str = "http://local-model:8000/v1"
+    local_model_name: str = "local-instruct-model"
+    local_model_timeout_seconds: float = 20.0
+    local_model_api_key: str = "EMPTY"
+
+    ocr_backend: Literal["local", "none"] = "local"
+    ocr_timeout_seconds: float = 30.0
+
+    external_provider: Literal["openai-compatible"] = "openai-compatible"
+    external_base_url: str = "http://fake-external:9100/v1"
+    external_api_key: str = "set-through-secret-manager"
+    external_allowed_models: str = ""
+    external_timeout_seconds: float = 60.0
+
+    dev_static_tokens: str = ""
+
+    enable_streaming: bool = False
+    enable_payload_logging: bool = False
+
+    # ---- derived helpers -------------------------------------------------
+
+    @property
+    def allowed_models(self) -> frozenset[str]:
+        return frozenset(m.strip() for m in self.external_allowed_models.split(",") if m.strip())
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env in ("staging", "production")
+
+    def vault_master_key(self) -> bytes:
+        return _decode_key(self.vault_master_key_b64, "VAULT_MASTER_KEY_B64")
+
+    def vault_hmac_key(self) -> bytes:
+        return _decode_key(self.vault_hmac_key_b64, "VAULT_HMAC_KEY_B64")
+
+    def static_principals(self) -> dict[str, Principal]:
+        """Parse ``DEV_STATIC_TOKENS``.
+
+        Development-only. Production replaces this with mTLS or short-lived
+        identity tokens; :meth:`validate_for_environment` refuses to start a
+        production process that still has static tokens configured.
+        """
+        out: dict[str, Principal] = {}
+        for raw in self.dev_static_tokens.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            parts = raw.split(":")
+            if len(parts) != 4:
+                raise ConfigurationError(
+                    "DEV_STATIC_TOKENS entries must be token:tenant:principal:purpose|purpose"
+                )
+            token, tenant, principal_id, purposes = parts
+            out[token] = Principal(
+                principal_id=principal_id,
+                tenant_id=tenant,
+                allowed_purposes=frozenset(p for p in purposes.split("|") if p),
+            )
+        return out
+
+    # ---- validation ------------------------------------------------------
+
+    @field_validator("external_base_url", "local_model_base_url")
+    @classmethod
+    def _must_be_absolute_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(f"{value!r} is not an absolute http(s) URL")
+        if "*" in value:
+            raise ValueError("wildcard hosts are not allowed for provider endpoints")
+        return value
+
+    @model_validator(mode="after")
+    def _streaming_is_off(self) -> "Settings":
+        if self.enable_streaming:
+            # Guide §13.5: safe restoration across chunk boundaries is not designed yet.
+            raise ValueError("streaming is not implemented in the MVP; set ENABLE_STREAMING=false")
+        return self
+
+    def validate_for_environment(self) -> None:
+        """Hard startup gate. Raises :class:`ConfigurationError` on any violation."""
+        problems: list[str] = []
+
+        if not self.policy_file.exists():
+            problems.append(f"policy file not found: {self.policy_file}")
+        if not self.allowed_models:
+            problems.append("EXTERNAL_ALLOWED_MODELS must list at least one model")
+
+        for name, value in (
+            ("VAULT_MASTER_KEY_B64", self.vault_master_key_b64),
+            ("VAULT_HMAC_KEY_B64", self.vault_hmac_key_b64),
+        ):
+            if value in PLACEHOLDER_SECRETS:
+                if self.is_production:
+                    problems.append(f"{name} is a placeholder; production requires a real key")
+            else:
+                try:
+                    _decode_key(value, name)
+                except ConfigurationError as exc:
+                    problems.append(str(exc))
+
+        if self.is_production:
+            if self.storage_backend != "postgres":
+                problems.append("production requires STORAGE_BACKEND=postgres")
+            if self.enable_payload_logging:
+                problems.append("ENABLE_PAYLOAD_LOGGING must be false in production")
+            if self.dev_static_tokens:
+                problems.append("DEV_STATIC_TOKENS must be empty in production")
+            if self.external_api_key in PLACEHOLDER_SECRETS:
+                problems.append("EXTERNAL_API_KEY must come from the secret manager")
+            if "change-me" in self.database_url:
+                problems.append("DATABASE_URL still contains the development password")
+            if urlparse(self.external_base_url).scheme != "https":
+                problems.append("EXTERNAL_BASE_URL must use https in production")
+
+        if problems:
+            raise ConfigurationError(
+                "configuration rejected: " + "; ".join(problems),
+                public_detail="service configuration is invalid",
+            )
+
+
+def _decode_key(value: str, name: str) -> bytes:
+    if value in PLACEHOLDER_SECRETS:
+        raise ConfigurationError(f"{name} is not configured")
+    try:
+        key = base64.b64decode(value, validate=True)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a configuration error
+        raise ConfigurationError(f"{name} is not valid base64") from exc
+    if len(key) != 32:
+        raise ConfigurationError(f"{name} must decode to exactly 32 bytes, got {len(key)}")
+    return key
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
+
+
+def reset_settings_cache() -> None:
+    """Test hook. Never call this from request handling."""
+    get_settings.cache_clear()

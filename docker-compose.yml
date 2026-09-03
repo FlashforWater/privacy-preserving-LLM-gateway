@@ -1,0 +1,83 @@
+# Local development stack (guide §21.3, profile: dev).
+#
+# The external provider here is the fake one. Real provider access is a separate
+# profile that is never enabled by default, so a test run cannot send data to the
+# internet by accident.
+
+name: privacy-gateway
+
+services:
+  gateway:
+    build:
+      context: .
+      target: runtime
+    environment:
+      APP_ENV: development
+      POLICY_FILE: /app/config/policy.default.yaml
+      STORAGE_BACKEND: postgres
+      DATABASE_URL: postgresql+asyncpg://privacy_gateway:dev-password@postgres/privacy_gateway
+      EXTERNAL_BASE_URL: http://fake-external:9100/v1
+      EXTERNAL_API_KEY: fake-key
+      EXTERNAL_ALLOWED_MODELS: model-a,model-b,external-vlm-model
+      LOCAL_MODEL_BASE_URL: http://local-model:8000/v1
+      OCR_BACKEND: none
+      ENABLE_PAYLOAD_LOGGING: "false"
+      ENABLE_STREAMING: "false"
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      fake-external:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      # Writable scratch with a hard size cap; never a shared web root.
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: privacy_gateway
+      POSTGRES_PASSWORD: dev-password
+      POSTGRES_DB: privacy_gateway
+    # Bound to loopback: the database is reachable from the compose network and
+    # from the developer's machine, never from the network at large.
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U privacy_gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  fake-external:
+    image: python:3.12-slim
+    working_dir: /srv
+    command: ["python", "scripts/fake_external.py"]
+    environment:
+      FAKE_EXTERNAL_PORT: "9100"
+    volumes:
+      - ./scripts:/srv/scripts:ro
+    ports:
+      - "127.0.0.1:9100:9100"
+
+  local-model:
+    # CPU-friendly placeholder for the local detection assistant. Replace the
+    # image and model with the GPU service in docker-compose.gpu.yml.
+    profiles: ["cpu-model"]
+    image: ghcr.io/ggml-org/llama.cpp:server
+    command: ["--host", "0.0.0.0", "--port", "8000", "-hf", "Qwen/Qwen2.5-3B-Instruct-GGUF"]
+    ports:
+      - "127.0.0.1:8000:8000"
+
+volumes:
+  postgres-data:

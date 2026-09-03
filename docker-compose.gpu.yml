@@ -1,0 +1,40 @@
+# GPU overlay (guide §21.3, profile: gpu-model).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile gpu-model up
+#
+# Size the model after measuring VRAM on the target server, not from this file.
+# --gpu-memory-utilization and the served model are deployment decisions.
+
+services:
+  local-model:
+    profiles: ["gpu-model"]
+    image: vllm/vllm-openai:latest
+    command:
+      - "--model=Qwen/Qwen2.5-7B-Instruct"
+      - "--served-model-name=local-instruct-model"
+      - "--host=0.0.0.0"
+      - "--port=8000"
+      - "--max-model-len=16384"
+      - "--gpu-memory-utilization=0.85"
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - model-cache:/root/.cache/huggingface
+    ports:
+      - "127.0.0.1:8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  gateway:
+    environment:
+      LOCAL_MODEL_BASE_URL: http://local-model:8000/v1
+      LOCAL_MODEL_NAME: local-instruct-model
+      OCR_BACKEND: local
+
+volumes:
+  model-cache:

@@ -1,0 +1,211 @@
+"""Provider adapter contract (guide §14, §19.3.11).
+
+Checks the mapping in both directions and the retry policy's boundaries, using a
+transport stub rather than a network — a contract test that needs the internet is
+a contract test that gets skipped.
+"""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from app.core.deadlines import Deadline
+from app.core.enums import ContentItemType, ForwardPath
+from app.core.errors import ExternalProviderError, Forbidden
+from app.domain.requests import (
+    OutboundBinaryPart,
+    OutboundMessage,
+    OutboundTextPart,
+    SanitizedModelRequest,
+)
+from app.external.openai_compatible import OpenAICompatibleAdapter
+from app.external.response_validation import parse_openai_chat_completion
+from app.external.retry import RetryPolicy, is_retryable, with_retry
+
+ALLOWED = frozenset({"model-a"})
+
+
+def sanitized_request(**overrides: object) -> SanitizedModelRequest:
+    data: dict[str, object] = {
+        "request_id": "req-1",
+        "model": "model-a",
+        "purpose": "general",
+        "messages": (
+            OutboundMessage(
+                role="user",
+                parts=(
+                    OutboundTextPart(item_id="t1", text="hello"),
+                    OutboundBinaryPart(
+                        kind=ContentItemType.IMAGE, item_id="i1",
+                        data=b"\x89PNG\r\n\x1a\n", mime_type="image/png",
+                    ),
+                ),
+            ),
+        ),
+        "temperature": 0.2,
+        "max_output_tokens": 100,
+        "path": ForwardPath.SANITIZED,
+    }
+    data.update(overrides)
+    return SanitizedModelRequest(**data)  # type: ignore[arg-type]
+
+
+def stub_transport(handler) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://provider.test/v1"
+    )
+
+
+class TestRequestMapping:
+    async def test_text_and_image_parts_map_in_order(self) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured.update(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "model": "model-a",
+                    "choices": [
+                        {"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "ok"}}
+                    ],
+                },
+            )
+
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://provider.test/v1", api_key="k",
+            allowed_models=ALLOWED, client=stub_transport(handler),
+        )
+        await adapter.complete(sanitized_request(), Deadline.after(10))
+        content = captured["messages"][0]["content"]  # type: ignore[index]
+        assert [part["type"] for part in content] == ["text", "image_url"]
+        assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    async def test_streaming_is_never_requested(self) -> None:
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured.update(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={"model": "model-a", "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://provider.test/v1", api_key="k",
+            allowed_models=ALLOWED, client=stub_transport(handler),
+        )
+        await adapter.complete(sanitized_request(), Deadline.after(10))
+        assert captured["stream"] is False
+
+    async def test_idempotency_key_is_sent(self) -> None:
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Idempotency-Key"))
+            return httpx.Response(
+                200,
+                json={"model": "model-a", "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://provider.test/v1", api_key="k",
+            allowed_models=ALLOWED, client=stub_transport(handler),
+        )
+        await adapter.complete(sanitized_request(), Deadline.after(10))
+        assert seen == ["req-1"]
+
+    async def test_model_allow_list_is_enforced_at_the_adapter(self) -> None:
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://provider.test/v1", api_key="k",
+            allowed_models=ALLOWED,
+            client=stub_transport(lambda request: httpx.Response(200, json={})),
+        )
+        with pytest.raises(Forbidden):
+            await adapter.complete(sanitized_request(model="model-z"), Deadline.after(10))
+
+
+class TestResponseMapping:
+    def test_string_content_becomes_one_text_field(self) -> None:
+        response = parse_openai_chat_completion(
+            {"model": "model-a", "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "hi"}}]},
+            model="model-a",
+        )
+        assert [field.text for field in response.text_fields] == ["hi"]
+
+    def test_content_parts_are_flattened(self) -> None:
+        response = parse_openai_chat_completion(
+            {"model": "model-a", "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}}]},
+            model="model-a",
+        )
+        assert len(response.text_fields) == 2
+
+    def test_missing_choices_is_an_error(self) -> None:
+        with pytest.raises(ExternalProviderError):
+            parse_openai_chat_completion({"model": "model-a"}, model="model-a")
+
+    def test_oversized_response_is_rejected(self) -> None:
+        with pytest.raises(ExternalProviderError):
+            parse_openai_chat_completion(
+                {"model": "model-a", "choices": [
+                    {"index": 0, "message": {"content": "x" * 500_001}}]},
+                model="model-a",
+            )
+
+
+class TestRetry:
+    @pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+    def test_transient_statuses_are_retryable(self, status: int) -> None:
+        error = httpx.HTTPStatusError(
+            "x", request=httpx.Request("POST", "http://x"),
+            response=httpx.Response(status),
+        )
+        assert is_retryable(error)
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+    def test_client_errors_are_not_retried(self, status: int) -> None:
+        error = httpx.HTTPStatusError(
+            "x", request=httpx.Request("POST", "http://x"),
+            response=httpx.Response(status),
+        )
+        assert not is_retryable(error)
+
+    async def test_retry_stops_at_max_attempts(self) -> None:
+        attempts = 0
+
+        async def operation(_attempt: int) -> str:
+            nonlocal attempts
+            attempts += 1
+            raise httpx.ConnectError("nope")
+
+        with pytest.raises(httpx.ConnectError):
+            await with_retry(
+                operation,
+                policy=RetryPolicy(max_attempts=3, base_delay_seconds=0.0, max_delay_seconds=0.0),
+                deadline=Deadline.after(10),
+            )
+        assert attempts == 3
+
+    async def test_retry_respects_the_deadline(self) -> None:
+        async def operation(_attempt: int) -> str:
+            raise httpx.ConnectError("nope")
+
+        from app.core.errors import RequestDeadlineExceeded
+
+        with pytest.raises((httpx.ConnectError, RequestDeadlineExceeded)):
+            await with_retry(
+                operation,
+                policy=RetryPolicy(max_attempts=5, base_delay_seconds=10.0),
+                deadline=Deadline.after(0.01),
+            )

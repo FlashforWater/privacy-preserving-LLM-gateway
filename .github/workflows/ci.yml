@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[documents,dev]"
+
+      # The policy file is a startup gate: an invalid one stops the service from
+      # becoming ready, so it must not be mergeable.
+      - name: Validate policy
+        run: python scripts/check_policy.py config/policy.default.yaml
+
+      - name: Lint and type check
+        run: |
+          ruff format --check .
+          ruff check .
+          mypy app
+
+      - name: Unit, integration and contract tests
+        run: pytest tests/unit tests/integration tests/contract -q
+
+      # Kept as a separate step so a failure here is unmistakable in the log:
+      # these are the tests that prove protected bytes never leave the gateway.
+      - name: Security and failure-injection tests
+        run: pytest tests/security tests/failure_injection -q
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime image
+        run: docker build --target runtime -t privacy-gateway:ci .
+      - name: Fail if the image runs as root
+        run: |
+          user=$(docker run --rm --entrypoint id privacy-gateway:ci -u)
+          test "$user" != "0" || { echo "image runs as root"; exit 1; }

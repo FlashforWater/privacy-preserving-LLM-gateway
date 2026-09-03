@@ -1,0 +1,76 @@
+# Default policy (guide §9.2).
+#
+# THIS IS A STARTING POINT, NOT A LEGAL DETERMINATION. The organization
+# responsible for the deployment must review and approve the final policy before
+# production use.
+#
+# Unknown keys are rejected by the loader so a misspelling fails at startup
+# instead of silently disabling a rule.
+
+version: "2026-09-01.1"
+
+defaults:
+  unknown_entity: BLOCK
+  unsupported_content: BLOCK
+  detector_error: BLOCK
+  # Findings below an entity's minimum_confidence follow this rule rather than
+  # being dropped (guide §9.3.8). REDACT keeps the request usable while removing
+  # the span the detector was unsure about.
+  low_confidence: REDACT
+
+entities:
+  ID_CARD:
+    action: TOKENIZE
+    minimum_confidence: 0.50
+  PERSON:
+    action: TOKENIZE
+    minimum_confidence: 0.75
+  PHONE:
+    action: TOKENIZE
+    minimum_confidence: 0.60
+  BANK_CARD:
+    action: TOKENIZE
+    minimum_confidence: 0.60
+  EMAIL:
+    action: TOKENIZE
+    minimum_confidence: 0.70
+  ADDRESS_DETAILED:
+    action: TOKENIZE
+    minimum_confidence: 0.75
+  ORGANIZATION:
+    action: PASS
+    minimum_confidence: 0.75
+  VEHICLE_PLATE:
+    action: TOKENIZE
+    minimum_confidence: 0.75
+  MEDICAL_DATA:
+    action: BLOCK
+  FACE:
+    action: PASS
+  UNKNOWN_SENSITIVE:
+    action: BLOCK
+
+content_classes:
+  ORDINARY_IMAGE:
+    action: PASS
+  ID_DOCUMENT_IMAGE:
+    action: LOCAL_ANALYZE_TO_SANITIZED_TEXT
+  SENSITIVE_IMAGE:
+    action: LOCAL_ANALYZE_TO_SANITIZED_TEXT
+  UNKNOWN_IMAGE:
+    action: BLOCK
+
+purpose_overrides:
+  medical_report_analysis:
+    MEDICAL_DATA:
+      action: PASS
+
+limits:
+  max_request_bytes: 52428800
+  max_file_bytes: 20971520
+  max_scope_bytes: 209715200
+  max_scope_turns: 50
+  max_scope_files: 20
+  max_scope_pages: 200
+  max_scope_mappings: 5000
+  max_ocr_pixels: 40000000
