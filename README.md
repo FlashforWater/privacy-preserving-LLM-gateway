@@ -196,6 +196,42 @@ sanitization chain runs after it. Keep it on a private network.
 
 ---
 
+## The external model
+
+```dotenv
+EXTERNAL_BASE_URL=https://provider.example/v1   # include the API path prefix
+EXTERNAL_API_KEY=...                            # secret manager in production
+EXTERNAL_ALLOWED_MODELS=model-a,model-b         # allow-list, not a default
+EXTERNAL_TIMEOUT_SECONDS=60
+```
+
+```bash
+make check-external
+```
+
+`EXTERNAL_ALLOWED_MODELS` is an allow-list: a manifest naming a model outside it
+is refused, and the check runs twice — once at the route, once inside the adapter
+immediately before bytes leave the process.
+
+Two things measurement against a live provider changed here:
+
+* **A base URL missing its API path prefix does not fail loudly.** The host's web
+  console answers `200` with an HTML page, so `raise_for_status` passes and the
+  JSON decode error used to escape as a generic 500. The adapter now checks the
+  content type and names the likely cause.
+* **The output budget covers reasoning too.** A reasoning provider spends it
+  before writing a word — an 800-token budget was consumed entirely on
+  deliberation, returning empty content, which is indistinguishable from "the
+  model had nothing to say". The default is now 4000 and an exhausted budget
+  says so.
+
+Token fidelity is the property the restoration path depends on, and
+`make check-external` tests it directly: a synthetic probe that forces the model
+to refer to entities, checked for markers returned byte-for-byte, invented, or
+rewritten.
+
+---
+
 ## Chinese-language operation
 
 The corpus is Chinese insurance and medical paperwork, and several things behave

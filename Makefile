@@ -73,6 +73,10 @@ smoke: ## Exercise safe, sanitized, blocked and closed-scope paths against a run
 check-model: ## Verify the local detection model endpoint before wiring it in
 	$(BIN)/python scripts/check_local_model.py
 
+.PHONY: check-external
+check-external: ## Verify the external provider endpoint and token fidelity
+	$(BIN)/python scripts/check_external_provider.py
+
 .PHONY: fake-provider
 fake-provider: ## Run the recording fake provider locally
 	$(BIN)/python scripts/fake_external.py

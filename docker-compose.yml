@@ -16,9 +16,9 @@ services:
       POLICY_FILE: /app/config/policy.default.yaml
       STORAGE_BACKEND: postgres
       DATABASE_URL: postgresql+asyncpg://privacy_gateway:dev-password@postgres/privacy_gateway
-      EXTERNAL_BASE_URL: http://fake-external:9100/v1
-      EXTERNAL_API_KEY: fake-key
-      EXTERNAL_ALLOWED_MODELS: model-a,model-b,external-vlm-model
+      # EXTERNAL_* comes from .env. Hard-coding it here would silently
+      # override the file operators actually edit; point .env at
+      # http://fake-external:9100/v1 to use the bundled recording fake.
       # LOCAL_MODEL_* comes from .env — the detection model runs on its own
       # server and is not part of this stack.
       OCR_BACKEND: none

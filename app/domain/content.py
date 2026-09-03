@@ -42,7 +42,12 @@ class RequestOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
-    max_output_tokens: int = Field(default=1200, ge=1, le=32768)
+    # Budget for the *whole* completion, reasoning included. A reasoning model
+    # spends this before it writes a word: measured against deepseek-v4-flash, a
+    # claims question consumed all 800 tokens on deliberation and returned empty
+    # content. The default is set high enough that the answer survives; callers
+    # that know their model does not reason can lower it per request.
+    max_output_tokens: int = Field(default=4000, ge=1, le=32768)
 
 
 class Manifest(BaseModel):

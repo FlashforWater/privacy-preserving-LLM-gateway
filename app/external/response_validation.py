@@ -74,9 +74,17 @@ def parse_openai_chat_completion(payload: Any, *, model: str) -> ExternalModelRe
                     )
 
     if not fields:
-        # A reasoning model returns content=null while thinking, and a provider
-        # that truncates mid-thought returns nothing usable. Silently handing the
-        # caller an empty answer hides a broken call; make it visible instead.
+        # A reasoning model spends the output budget on deliberation before it
+        # writes anything, so an exhausted budget looks exactly like a model that
+        # had nothing to say. Naming the cause saves an operator from debugging
+        # the wrong layer; silently returning an empty answer would hide it
+        # entirely.
+        if finish_reason == "length":
+            raise ExternalProviderError(
+                "provider consumed the entire output budget without producing "
+                "content; raise options.max_output_tokens",
+                public_detail="external provider returned an unexpected response",
+            )
         raise ExternalProviderError(
             "provider response contained no text content",
             public_detail="external provider returned an unexpected response",

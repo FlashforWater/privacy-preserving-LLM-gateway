@@ -88,7 +88,26 @@ class OpenAICompatibleAdapter:
                 timeout=deadline.budget_for(self._timeout, reserve=2.0),
             )
             response.raise_for_status()
-            return parse_openai_chat_completion(response.json(), model=request.model)
+            # A misconfigured base URL is the common way this goes wrong, and it
+            # does not announce itself: a gateway or web front end happily
+            # answers 200 with an HTML page. Without this branch the JSON decode
+            # error escapes as an unhandled exception and the caller gets a
+            # generic 500 instead of a provider error naming the cause.
+            content_type = response.headers.get("content-type", "")
+            if "json" not in content_type.lower():
+                raise ExternalProviderError(
+                    f"provider returned content-type {content_type!r}; "
+                    "EXTERNAL_BASE_URL is probably missing its API path prefix",
+                    public_detail="external provider returned an unexpected response",
+                )
+            try:
+                payload_json = response.json()
+            except ValueError as exc:
+                raise ExternalProviderError(
+                    "provider response was not valid JSON",
+                    public_detail="external provider returned an unexpected response",
+                ) from exc
+            return parse_openai_chat_completion(payload_json, model=request.model)
 
         try:
             return await with_retry(attempt, policy=self._retry, deadline=deadline)

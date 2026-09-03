@@ -254,3 +254,69 @@ class TestReasoningModelResponses:
             model="model-a",
         )
         assert [field.text for field in response.text_fields] == ["the answer"]
+
+
+class TestMisconfiguredBaseUrl:
+    """A base URL missing its API path prefix is the common misconfiguration and
+    the one that hides best: the host's web front end answers 200 with an HTML
+    page, so status-code checks pass and only the body reveals the problem."""
+
+    async def test_html_response_becomes_a_provider_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, text="<!doctype html><html><body>web console</body></html>",
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://provider.test", api_key="k",
+            allowed_models=ALLOWED, client=stub_transport(handler),
+        )
+        with pytest.raises(ExternalProviderError) as exc:
+            await adapter.complete(sanitized_request(), Deadline.after(10))
+        # The message has to name the cause; without it the operator debugs the
+        # sanitizer instead of the URL.
+        assert "path prefix" in str(exc.value)
+
+    async def test_non_json_body_with_json_content_type(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, text="not json at all",
+                headers={"content-type": "application/json"},
+            )
+
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://provider.test/v1", api_key="k",
+            allowed_models=ALLOWED, client=stub_transport(handler),
+        )
+        with pytest.raises(ExternalProviderError):
+            await adapter.complete(sanitized_request(), Deadline.after(10))
+
+
+class TestExhaustedOutputBudget:
+    def test_budget_consumed_by_reasoning_names_the_cause(self) -> None:
+        """Measured against deepseek-v4-flash: an 800-token budget was spent
+        entirely on deliberation and the answer came back empty. That is
+        indistinguishable from a model with nothing to say unless the error says
+        so."""
+        with pytest.raises(ExternalProviderError) as exc:
+            parse_openai_chat_completion(
+                {
+                    "model": "model-a",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "length",
+                            "message": {"role": "assistant", "content": None,
+                                        "reasoning": "…"},
+                        }
+                    ],
+                },
+                model="model-a",
+            )
+        assert "max_output_tokens" in str(exc.value)
+
+    def test_default_budget_leaves_room_for_reasoning(self) -> None:
+        from app.domain.content import RequestOptions
+
+        assert RequestOptions().max_output_tokens >= 4000
