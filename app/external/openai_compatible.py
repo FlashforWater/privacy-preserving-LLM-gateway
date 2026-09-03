@@ -43,6 +43,7 @@ class OpenAICompatibleAdapter:
         api_key: str,
         allowed_models: frozenset[str],
         timeout_seconds: float = 60.0,
+        reasoning: str = "provider_default",
         retry: RetryPolicy | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -50,6 +51,7 @@ class OpenAICompatibleAdapter:
         self._api_key = api_key
         self._allowed_models = allowed_models
         self._timeout = timeout_seconds
+        self._reasoning = reasoning
         self._retry = retry or RetryPolicy()
         self._client = client
 
@@ -141,7 +143,7 @@ class OpenAICompatibleAdapter:
                     )
             messages.append({"role": message.role, "content": content})
 
-        return {
+        payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
             "temperature": request.temperature,
@@ -150,6 +152,23 @@ class OpenAICompatibleAdapter:
             # un-restored output has no safe failure mode.
             "stream": False,
         }
+        payload.update(self._reasoning_kwargs())
+        return payload
+
+    def _reasoning_kwargs(self) -> dict[str, Any]:
+        """Provider-specific switch for turning the chain of thought off.
+
+        The parameter name is not standardised. This one is what the configured
+        endpoint honours; others use ``thinking: {"type": "disabled"}`` or a
+        chat-template flag, and several silently ignore an unrecognised value —
+        deepseek-v4-flash treats ``reasoning_effort: "minimal"`` as no
+        instruction at all and reasons *more*. So the switch is opt-in, and
+        ``make check-external`` reports the reasoning-token count so a setting
+        that is being ignored is visible rather than assumed.
+        """
+        if self._reasoning != "disabled":
+            return {}
+        return {"reasoning_effort": "none"}
 
 
 class RecordingAdapter:

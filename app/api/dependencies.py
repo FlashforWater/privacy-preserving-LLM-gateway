@@ -166,6 +166,7 @@ def build_application(settings: Settings) -> Application:
         api_key=settings.external_api_key,
         allowed_models=settings.allowed_models,
         timeout_seconds=settings.external_timeout_seconds,
+        reasoning=settings.external_reasoning,
     )
 
     orchestrator = Orchestrator(

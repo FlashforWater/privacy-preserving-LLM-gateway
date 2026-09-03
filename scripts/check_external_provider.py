@@ -97,20 +97,20 @@ async def main() -> int:
 
         # 3. Round trip, with the budget the gateway actually sends.
         budget = 4000
+        request_body: dict[str, object] = {
+            "model": model,
+            "stream": False,
+            "temperature": 0.2,
+            "max_tokens": budget,
+            "messages": [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": PROBE},
+            ],
+        }
+        if settings.external_reasoning == "disabled":
+            request_body["reasoning_effort"] = "none"
         try:
-            reply = await client.post(
-                "/chat/completions",
-                json={
-                    "model": model,
-                    "stream": False,
-                    "temperature": 0.2,
-                    "max_tokens": budget,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM},
-                        {"role": "user", "content": PROBE},
-                    ],
-                },
-            )
+            reply = await client.post("/chat/completions", json=request_body)
             reply.raise_for_status()
             body = reply.json()
             choice = body["choices"][0]
@@ -124,7 +124,16 @@ async def main() -> int:
         usage = body.get("usage", {})
         reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
 
-        if reasoning_tokens:
+        if settings.external_reasoning == "disabled":
+            if reasoning_tokens:
+                # The parameter name is provider-specific and several providers
+                # ignore an unrecognised one silently. Saying so beats assuming.
+                line(WARN, "reasoning switch",
+                     f"EXTERNAL_REASONING=disabled but the provider still spent "
+                     f"{reasoning_tokens} reasoning tokens — it may not honour this parameter")
+            else:
+                line(OK, "reasoning switch", "honoured")
+        elif reasoning_tokens:
             line(OK, "reasoning model",
                  f"{reasoning_tokens} of {usage.get('completion_tokens')} completion tokens "
                  "spent deliberating")

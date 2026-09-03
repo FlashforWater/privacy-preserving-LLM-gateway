@@ -230,6 +230,35 @@ Token fidelity is the property the restoration path depends on, and
 to refer to entities, checked for markers returned byte-for-byte, invented, or
 rewritten.
 
+### Reasoning
+
+`EXTERNAL_REASONING=provider_default|disabled`. The default leaves the provider
+alone, because the external model is the reasoning engine and its analysis is the
+product.
+
+`disabled` is worth evaluating. Measured against deepseek-v4-flash on a
+cross-material claims question (n=6 with reasoning, n=5 without):
+
+| | reasoning on | reasoning off |
+|---|---|---|
+| latency | 2.4–6.3 s | 1.3–2.1 s |
+| completion tokens | 181–617 | 117–138 |
+| replies with markers intact | 4 of 6 | 5 of 5 |
+
+The fidelity gap has a plausible mechanism: during a long deliberation the model
+paraphrases entities into "甲/乙" and writes its answer from that paraphrase,
+losing the markers. A lost marker is a utility problem rather than a leak —
+restoration tolerates absence — but a reply saying "the driver" instead of a
+token cannot be attributed to anyone.
+
+The default was left unchanged because analytical quality on hard cases was
+assessed by reading a handful of answers, not measured. Settle it with the Phase
+2 evaluation set. The parameter name is provider-specific and several providers
+ignore an unrecognised one silently — deepseek-v4-flash treats
+`reasoning_effort: "minimal"` as no instruction and reasons *more* — so
+`make check-external` reports the reasoning-token count and warns when the switch
+appears to be ignored.
+
 ---
 
 ## Chinese-language operation

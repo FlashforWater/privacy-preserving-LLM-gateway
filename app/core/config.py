@@ -104,6 +104,28 @@ class Settings(BaseSettings):
     external_api_key: str = "set-through-secret-manager"
     external_allowed_models: str = ""
     external_timeout_seconds: float = 60.0
+    # Whether to ask the provider to skip its chain of thought.
+    #
+    # "provider_default" leaves it alone, which is what the design intends: the
+    # external model is the reasoning engine, and the analysis it performs —
+    # whether an injury matches an accident, whether materials contradict each
+    # other — is the product.
+    #
+    # "disabled" is worth considering. Measured against deepseek-v4-flash on a
+    # cross-material claims question (n=6 with reasoning, n=5 without):
+    #   latency        2.4–6.3s   ->  1.3–2.1s
+    #   completion     181–617    ->  117–138 tokens
+    #   marker fidelity  4 of 6   ->  5 of 5 replies used the tokens intact
+    # The fidelity difference has a plausible mechanism: during a long
+    # deliberation the model paraphrases entities into "甲/乙" and writes the
+    # answer from that paraphrase, losing the markers. Lost markers are a
+    # utility problem, not a leak — restoration tolerates their absence — but a
+    # reply that says "the driver" instead of a token cannot be attributed.
+    #
+    # The default is left at provider_default because analytical quality on hard
+    # cases was assessed by reading a handful of answers, not measured. Decide it
+    # with the Phase 2 evaluation set, not from this note.
+    external_reasoning: Literal["provider_default", "disabled"] = "provider_default"
 
     dev_static_tokens: str = ""
 

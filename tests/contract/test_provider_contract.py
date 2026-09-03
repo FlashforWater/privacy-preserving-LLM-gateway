@@ -320,3 +320,39 @@ class TestExhaustedOutputBudget:
         from app.domain.content import RequestOptions
 
         assert RequestOptions().max_output_tokens >= 4000
+
+
+class TestReasoningSwitch:
+    """Turning the provider's chain of thought off is opt-in and provider-specific."""
+
+    async def _captured_body(self, **adapter_kwargs: object) -> dict:
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured.update(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={"model": "model-a", "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}}]},
+                headers={"content-type": "application/json"},
+            )
+
+        adapter = OpenAICompatibleAdapter(
+            base_url="http://provider.test/v1", api_key="k",
+            allowed_models=ALLOWED, client=stub_transport(handler),
+            **adapter_kwargs,  # type: ignore[arg-type]
+        )
+        await adapter.complete(sanitized_request(), Deadline.after(10))
+        return captured
+
+    async def test_default_sends_no_reasoning_parameter(self) -> None:
+        """The external model is the reasoning engine (guide §1); the gateway does
+        not quietly change how it thinks."""
+        body = await self._captured_body()
+        assert "reasoning_effort" not in body
+
+    async def test_disabled_sends_the_switch(self) -> None:
+        body = await self._captured_body(reasoning="disabled")
+        assert body["reasoning_effort"] == "none"
