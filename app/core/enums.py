@@ -21,6 +21,10 @@ class EntityType(str, Enum):
     EMAIL = "EMAIL"
     ADDRESS_DETAILED = "ADDRESS_DETAILED"
     ORGANIZATION = "ORGANIZATION"
+    #: A registered identifier for a legal entity (统一社会信用代码). Distinct
+    #: from ORGANIZATION, which is a name: a name is often analytically useful
+    #: and a registration number never is.
+    ORG_ID = "ORG_ID"
     VEHICLE_PLATE = "VEHICLE_PLATE"
     MEDICAL_DATA = "MEDICAL_DATA"
     FACE = "FACE"

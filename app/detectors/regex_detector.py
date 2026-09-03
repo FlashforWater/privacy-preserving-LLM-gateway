@@ -25,7 +25,7 @@ from app.core.enums import EntityType, FindingSource
 from app.domain.content import ContentItem, ParsedItem
 from app.domain.findings import Finding
 
-from .checksum import cn_id_checksum_ok, cn_id_date_plausible, luhn_ok
+from .checksum import cn_id_checksum_ok, cn_id_date_plausible, luhn_ok, uscc_checksum_ok
 
 #: Characters that may appear *inside* an identifier without breaking it.
 _SEP = r"[ \t 　\-‐-―－.]{0,2}"
@@ -60,6 +60,12 @@ class RegexRule:
     #: A validator that rejects rather than merely down-weights. Used only where a
     #: failed check means "this is definitely not that identifier".
     hard_filter: Callable[[str], bool] | None = None
+    #: Characters stripped from the left of a match, with the offset advanced to
+    #: match. Chinese prose runs words together, so a pattern anchored on a road
+    #: suffix picks up the preposition in front of it ("在苏州…", "家住北京…").
+    #: Over-capture is safe but destroys the surrounding label the downstream
+    #: model reads, so the particles come off.
+    trim_leading: str = ""
     evidence: str = "pattern"
 
 
@@ -69,6 +75,10 @@ def _c(pattern: str) -> re.Pattern[str]:
 
 _CN_PROVINCE = "京津冀晋蒙辽吉黑沪苏浙皖闽赣鲁豫鄂湘粤桂琼渝川贵云藏陕甘青宁新"
 _PLATE_LETTER = "A-HJ-NP-Z"
+_CJK = "一-龥"
+#: Prepositions and framing words that Chinese prose glues to the front of an
+#: address. Trimmed from the left of an address match.
+_ADDRESS_LEAD = "住址地为是从往赴到于在家公司的了"
 
 RULES: tuple[RegexRule, ...] = (
     RegexRule(
@@ -79,6 +89,57 @@ RULES: tuple[RegexRule, ...] = (
         validator=cn_id_checksum_ok,
         hard_filter=cn_id_date_plausible,
         evidence="structure+date",
+    ),
+    RegexRule(
+        rule_id="cn_id_card_15",
+        entity_type=EntityType.ID_CARD,
+        # The pre-2000 format. No check digit exists, so the embedded birth date
+        # is the only structural evidence — but archived claim files are full of
+        # them and a missed one is a disclosed identity.
+        pattern=_c(r"(?<!\d)[1-9]\d{5}\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}(?!\d)"),
+        base_confidence=0.70,
+        evidence="structure+date",
+    ),
+    RegexRule(
+        rule_id="cn_travel_document",
+        entity_type=EntityType.ID_CARD,
+        # 护照 E/G, 公务护照 D/S/P, 港澳通行证 C/W, 台胞证 H/M.
+        pattern=_c(r"(?<![A-Za-z0-9])(?:[EG]\d{8}|[DSP]\d{7}|[CW]\d{8}|[HM]\d{8,10})(?![A-Za-z0-9])"),
+        base_confidence=0.60,
+        evidence="structure",
+    ),
+    RegexRule(
+        rule_id="cn_uscc",
+        entity_type=EntityType.ORG_ID,
+        pattern=_c(r"(?<![A-Za-z0-9])[0-9A-HJ-NPQRTUWXY]{18}(?![A-Za-z0-9])"),
+        base_confidence=0.55,
+        validator=uscc_checksum_ok,
+        evidence="structure+check_character",
+    ),
+    RegexRule(
+        rule_id="cn_landline",
+        entity_type=EntityType.PHONE,
+        # An explicit separator is required. Without it the pattern matches any
+        # eleven-digit run beginning with zero, and claim documents are full of
+        # amounts, timestamps and policy numbers that would then be redacted.
+        pattern=_c(r"(?<![\d-])(?:0\d{2,3}[-\s]\d{7,8}|\(0\d{2,3}\)\s?\d{7,8})(?![\d-])"),
+        base_confidence=0.65,
+        evidence="structure+separator",
+    ),
+    RegexRule(
+        rule_id="cn_detailed_address",
+        entity_type=EntityType.ADDRESS_DETAILED,
+        # Anchored on a road/lane suffix followed by a number. A bare
+        # province or city is not detailed enough to identify anyone and is
+        # deliberately not matched.
+        pattern=_c(
+            rf"(?:[{_CJK}]{{2,8}}(?:省|自治区))?(?:[{_CJK}]{{2,8}}(?:市|区|县|旗))*"
+            rf"[{_CJK}A-Za-z0-9]{{2,20}}(?:路|街|大道|巷|弄|村|镇)"
+            rf"[{_CJK}A-Za-z0-9]{{0,12}}(?:号|弄|栋|幢|单元|室|层)"
+        ),
+        base_confidence=0.80,
+        trim_leading=_ADDRESS_LEAD,
+        evidence="administrative_structure",
     ),
     RegexRule(
         rule_id="cn_phone_mobile",
@@ -140,10 +201,15 @@ class RegexDetector:
         for rule in self._rules:
             for match in rule.pattern.finditer(folded):
                 start, end = match.start(), match.end()
+                if rule.trim_leading:
+                    while start < end and folded[start] in rule.trim_leading:
+                        start += 1
+                    if start >= end:
+                        continue
                 # Report the ORIGINAL substring: the folded copy is a matching aid,
                 # and the tokenizer must replace exactly what the document contains.
                 raw = text[start:end]
-                candidate = match.group(0)
+                candidate = folded[start:end]
                 if rule.hard_filter is not None and not rule.hard_filter(candidate):
                     continue
                 confidence = rule.base_confidence

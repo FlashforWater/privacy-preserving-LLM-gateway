@@ -34,6 +34,7 @@ _ENTITY_SEVERITY: tuple[EntityType, ...] = (
     EntityType.PHONE,
     EntityType.EMAIL,
     EntityType.VEHICLE_PLATE,
+    EntityType.ORG_ID,
     EntityType.ADDRESS_DETAILED,
     EntityType.PERSON,
     EntityType.MEDICAL_DATA,

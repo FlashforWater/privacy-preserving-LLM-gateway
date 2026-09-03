@@ -36,7 +36,19 @@ from app.domain.findings import Finding
 
 from .base import DetectorUnavailable, clamp_confidence
 
-PROMPT_PATH = Path(__file__).parent / "prompts" / "entity_detection_v1.txt"
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+DEFAULT_PROMPT = "entity_detection_zh_v1"
+
+
+def load_prompt(name: str) -> str:
+    path = PROMPTS_DIR / f"{name}.txt"
+    if not path.is_file():
+        available = sorted(p.stem for p in PROMPTS_DIR.glob("*.txt"))
+        raise DetectorUnavailable(
+            f"detection prompt {name!r} not found; available: {available}",
+            public_detail="local inspection unavailable",
+        )
+    return path.read_text(encoding="utf-8")
 
 MAX_ENTITIES = 200
 MAX_RESPONSE_BYTES = 256_000
@@ -116,6 +128,7 @@ class OpenAICompatibleLocalModel:
         timeout_seconds: float = 20.0,
         disable_thinking: bool = True,
         max_tokens: int = 4096,
+        prompt: str = DEFAULT_PROMPT,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -126,7 +139,7 @@ class OpenAICompatibleLocalModel:
         self._max_tokens = max_tokens
         self._client = client
         self._capabilities: LocalModelCapabilities | None = None
-        self._prompt_template = PROMPT_PATH.read_text(encoding="utf-8")
+        self._prompt_template = load_prompt(prompt)
 
     # ---- transport -------------------------------------------------------
 

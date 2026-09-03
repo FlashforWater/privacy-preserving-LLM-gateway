@@ -40,6 +40,12 @@ entities:
   ORGANIZATION:
     action: PASS
     minimum_confidence: 0.75
+  # A company name can carry analytical value; its registration number cannot,
+  # and it identifies the entity exactly. Tokenized so the external model can
+  # still tell two organisations apart.
+  ORG_ID:
+    action: TOKENIZE
+    minimum_confidence: 0.60
   VEHICLE_PLATE:
     action: TOKENIZE
     minimum_confidence: 0.75

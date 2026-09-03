@@ -29,6 +29,10 @@ from app.core.enums import ImageClass
 DOCUMENT_KEYWORDS: tuple[str, ...] = (
     "身份证", "居民身份证", "护照", "驾驶证", "行驶证", "户口", "签发机关", "有效期限",
     "银行卡", "信用卡", "社会保障", "医保卡", "出生日期", "公民身份号码",
+    # Documents that turn up constantly in Chinese claims files.
+    "港澳通行证", "台胞证", "军官证", "警官证", "营业执照", "统一社会信用代码",
+    "出生医学证明", "结婚证", "房产证", "不动产权证", "组织机构代码",
+    "机动车登记证书", "道路运输证", "从业资格证", "residence permit",
     "passport", "driver licen", "driving licence", "identity card", "id card",
     "date of birth", "place of birth", "issuing authority", "valid until",
     "cardholder", "expiry date", "social security",

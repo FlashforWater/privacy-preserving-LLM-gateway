@@ -101,8 +101,16 @@ def canonicalize(value: str, entity_type: EntityType) -> str:
     * Emails are lower-cased.
     * Names and addresses are **not** aggressively folded: internal spacing is
       collapsed, but nothing else. Two spellings stay two values.
+    * Whitespace *between CJK characters* is removed entirely. In Chinese there
+      is no word spacing, so a space inside 「张 伟」 is layout or OCR noise, not
+      meaning. Leaving it in would give 「张 伟」 and 「张伟」 two different tokens
+      and break coreference across materials in the same scope — the model would
+      then see two people where the document has one. Removing it is still
+      deterministic normalization, not alias merging: the characters are
+      identical, only inter-character whitespace differs.
     """
     text = unicodedata.normalize("NFKC", value).strip()
+    text = _collapse_cjk_spacing(text)
     if entity_type in (EntityType.PHONE, EntityType.BANK_CARD, EntityType.ID_CARD):
         compact = re.sub(r"[\s\-‐-―().]", "", text)
         return compact.upper()
@@ -111,6 +119,14 @@ def canonicalize(value: str, entity_type: EntityType) -> str:
     if entity_type is EntityType.VEHICLE_PLATE:
         return re.sub(r"[\s·\-]", "", text).upper()
     return re.sub(r"\s+", " ", text)
+
+
+#: Whitespace flanked by CJK characters carries no meaning in Chinese text.
+_CJK_SPACING = re.compile(r"(?<=[\u3400-\u9fff\uf900-\ufaff])\s+(?=[\u3400-\u9fff\uf900-\ufaff])")
+
+
+def _collapse_cjk_spacing(value: str) -> str:
+    return _CJK_SPACING.sub("", value)
 
 
 def canonical_hmac(

@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     # parameter; the detector then needs a larger token budget.
     local_model_disable_thinking: bool = True
     local_model_max_tokens: int = 4096
+    # Detection prompt. The Chinese one is the default because the corpus is
+    # Chinese and the served model follows Chinese instructions more closely:
+    # measured on a claims note it used 515 completion tokens against 785 for
+    # the English prompt, and stopped mis-labelling plates and phone numbers as
+    # UNKNOWN_SENSITIVE (which the policy blocks on).
+    local_model_prompt: str = "entity_detection_zh_v1"
 
     ocr_backend: Literal["local", "none"] = "local"
     ocr_timeout_seconds: float = 30.0

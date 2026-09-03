@@ -196,6 +196,47 @@ sanitization chain runs after it. Keep it on a private network.
 
 ---
 
+## Chinese-language operation
+
+The corpus is Chinese insurance and medical paperwork, and several things behave
+differently there than they do on English fixtures. Each of the following was
+measured against the deployed Qwen3.8 endpoint and real-shaped Chinese documents.
+
+**The model's character offsets are wrong essentially always.** On a Chinese
+claims note it named 13 of 13 entities correctly and got 0 of 13 offsets right —
+against 1 of 6 correct on English text. Locating the claimed string ourselves
+([ADR 0005](docs/adr/0005-locate-model-spans-in-the-document.md)) is therefore not
+an optimisation here: without it the local detector contributes nothing at all in
+Chinese.
+
+**The detection prompt is Chinese** (`entity_detection_zh_v1`, selectable through
+`LOCAL_MODEL_PROMPT`). It uses 597 completion tokens against 785 for the English
+prompt on the same document, and it stops the model labelling plates, phone
+numbers and ID numbers as `UNKNOWN_SENSITIVE` — which the policy blocks on, so
+the English prompt was turning routine claims into blocked requests. The prompt
+tells the model that identifiers with deterministic rules are not its job, but
+that *other* document numbers — 护照, 港澳通行证, 台胞证, 社保卡号, 病历号 —
+still are, so the safety net stays in place.
+
+**Forms align fields with spaces, not colons.** `姓名　张伟` and
+`被保险人  张伟` carry no delimiter, so the label rules accept whitespace as a
+separator and stop the value at a two-space column gap.
+
+**Deterministic rules cover the Chinese identifier set**: 18- and 15-digit
+national IDs, 统一社会信用代码 (with its GB 32100 check character, as the new
+`ORG_ID` entity type), 护照 / 港澳通行证 / 台胞证, landlines written with an
+area-code separator, plates with a full-width interpunct, and street-level
+addresses anchored on 路/街/号 with the Chinese preposition in front trimmed off.
+
+**OCR spacing inside a name no longer splits its token.** Chinese has no word
+spacing, so a space inside 「张 伟」 is layout noise; canonicalization removes
+whitespace between CJK characters. Left in, the same person would receive two
+tokens and coreference would break across materials in one scope — the external
+model would see two people where the file has one. This is still deterministic
+normalization, not alias merging: 「张伟」 and 「张先生」 remain separate.
+
+---
+
 ## Configuration
 
 `.env.example` documents every key. Production refuses to start when any of these

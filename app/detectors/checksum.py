@@ -39,6 +39,31 @@ def cn_id_checksum_ok(value: str) -> bool:
     return compact[17].upper() == _CN_ID_CHECK[total % 11]
 
 
+# 统一社会信用代码 (GB 32100-2015). The alphabet excludes I, O, S, V and Z so
+# that no character can be confused with a digit.
+_USCC_ALPHABET = "0123456789ABCDEFGHJKLMNPQRTUWXY"
+_USCC_WEIGHTS = (1, 3, 9, 27, 19, 26, 16, 17, 20, 29, 25, 13, 8, 24, 10, 30, 28)
+
+
+def uscc_checksum_ok(value: str) -> bool:
+    """Unified Social Credit Identifier check character.
+
+    An 18-character identifier for a legal entity. It appears throughout claims
+    paperwork (投保单位, 维修厂, 医疗机构) and identifies the organisation
+    unambiguously, which for a 个体工商户 means it identifies a person.
+    """
+    text = value.strip().upper()
+    if len(text) != 18 or any(c not in _USCC_ALPHABET for c in text):
+        return False
+    total = sum(
+        _USCC_ALPHABET.index(c) * w
+        for c, w in zip(text[:17], _USCC_WEIGHTS, strict=True)
+    )
+    remainder = 31 - total % 31
+    expected = _USCC_ALPHABET[0 if remainder == 31 else remainder]
+    return text[17] == expected
+
+
 def cn_id_date_plausible(value: str) -> bool:
     """Cheap sanity check on the embedded birth date.
 
