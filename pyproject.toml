@@ -25,13 +25,17 @@ dependencies = [
 [project.optional-dependencies]
 # Document parsing. Kept optional so the gateway can start without them —
 # a missing parser must fail closed for that content type, never pass it through.
-documents = [
-    "pypdf>=5.1",
-    "python-docx>=1.1",
-    "openpyxl>=3.1",
-    "pillow>=11.0",
-]
-ocr = ["rapidocr-onnxruntime>=1.4"]
+# DOCX and XLSX need nothing: they are zip archives of XML, read with the
+# standard library. That is deliberate — the safety requirement is to inspect
+# *every* component (headers, footers, comments, hidden sheets, properties), and
+# a convenience library that exposes only the main body would make "we inspected
+# everything" impossible to assert honestly.
+documents = ["pypdf>=5.1"]
+# Image *metadata* is parsed with the standard library, for the same reason: the
+# check that decides whether original pixels may leave should not depend on a
+# third-party imaging library that might normalise away the very EXIF it is
+# looking for. OCR is what needs a package, and only for images and scanned PDFs.
+ocr = ["rapidocr-onnxruntime>=1.3"]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

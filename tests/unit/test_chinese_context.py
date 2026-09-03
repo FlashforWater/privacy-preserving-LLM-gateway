@@ -200,3 +200,36 @@ class TestChinesePromptIsDefault:
 
         with pytest.raises(DetectorUnavailable):
             load_prompt("no_such_prompt")
+
+
+class TestOcrEngineCompatibility:
+    """RapidOCR ships as two distributions with genuinely different APIs.
+
+    ``rapidocr_onnxruntime`` (1.x) has no wheels for recent Python versions, so a
+    deployment that pins it runs without OCR — which, given the fail-closed
+    behaviour, silently blocks every image. Supporting both makes that a choice.
+    """
+
+    def test_v3_output_shape(self) -> None:
+        from app.ocr.local_ocr import RapidOcrEngine
+
+        class Output:
+            txts = ("张伟", "身份证 320502199003079999")
+            scores = (0.98, 0.95)
+
+        lines = RapidOcrEngine._to_lines(Output())
+        assert [line.text for line in lines] == list(Output.txts)
+        assert lines[0].confidence == 0.98
+
+    def test_v1_output_shape(self) -> None:
+        from app.ocr.local_ocr import RapidOcrEngine
+
+        raw = ([[None, "张伟", 0.98], [None, "电话 13812345678", 0.9]], 0.5)
+        lines = RapidOcrEngine._to_lines(raw)
+        assert [line.text for line in lines] == ["张伟", "电话 13812345678"]
+
+    def test_image_without_text_is_not_an_error(self) -> None:
+        """1.x returns None rather than an empty list for a blank image."""
+        from app.ocr.local_ocr import RapidOcrEngine
+
+        assert RapidOcrEngine._to_lines((None, 0.1)) == ()
