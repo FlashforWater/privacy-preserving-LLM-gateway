@@ -26,9 +26,12 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import traceback
+from collections.abc import Coroutine
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, TypeVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -77,6 +80,37 @@ SAMPLE = """理赔申请材料
 
 请判断：伤情与事故形态是否吻合，是否存在既往伤，材料间有无矛盾。
 涉及当事人时请使用材料中的标记指代。"""
+
+
+T = TypeVar("T")
+
+
+class LoopRunner:
+    """One event loop for the process, on a background thread.
+
+    ``asyncio.run`` per request looks tidy and is wrong here: the httpx clients
+    inside the local-model and provider adapters are created lazily and cached,
+    so they bind to the loop of whichever request built them. The next request
+    gets a fresh loop, the pooled connection still points at the closed one, and
+    the second run dies with "Event loop is closed" while the first looked fine.
+
+    The gateway itself does not have this problem — uvicorn keeps one loop for
+    the process lifetime — so this is the debug server matching the runtime it is
+    pretending to be. Serialising requests is a bonus: one trace at a time is
+    what a person reading the page wants anyway.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="trace-loop")
+        self._thread.start()
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def submit(self, coro: Coroutine[Any, Any, T], timeout: float) -> T:
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
 
 
 class Gateway:
@@ -225,6 +259,7 @@ class Gateway:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     gateway: Gateway
+    loop: LoopRunner
 
     def log_message(self, fmt: str, *args: object) -> None:  # noqa: A003
         return
@@ -263,12 +298,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid json"})
             return
         try:
-            result = asyncio.run(
+            result = self.loop.submit(
                 self.gateway.run(
                     payload.get("text") or "",
                     payload.get("purpose") or "general",
                     payload.get("scope_id") or None,
-                )
+                ),
+                timeout=self.gateway.settings.request_deadline_seconds + 30,
             )
         except Exception as exc:  # noqa: BLE001 - a debug tool should show the failure
             self._json(500, {"error": type(exc).__name__, "message": str(exc),
@@ -291,6 +327,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     port = int(os.environ.get("TRACE_UI_PORT", "8090"))
     Handler.gateway = Gateway()
+    Handler.loop = LoopRunner()
     # Loopback only. The page shows unredacted content by design.
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"pipeline inspector: http://127.0.0.1:{port}")
